@@ -1,0 +1,70 @@
+name: csmsam
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python
+  - python=3.10.13
+
+  # PyTorch (CUDA 11.8 — change cu118 → cu121 if you have CUDA 12.x)
+  - pytorch::pytorch=2.1.2
+  - pytorch::torchvision=0.16.2
+  - pytorch::pytorch-cuda=11.8
+
+  # Scientific stack
+  - numpy=1.26.4
+  - scipy=1.12.0
+  - scikit-image=0.22.0
+  - scikit-learn=1.4.0
+  - matplotlib=3.8.3
+  - seaborn=0.13.2
+  - Pillow=10.2.0
+  - imageio=2.33.1
+
+  # Medical imaging
+  - conda-forge::simpleitk=2.3.1
+  - conda-forge::nibabel=5.2.0
+
+  # Utilities
+  - tqdm=4.66.2
+  - pyyaml=6.0.1
+  - h5py=3.10.0
+  - requests=2.31.0
+
+  # Dev tools
+  - pytest=7.4.4
+  - black=24.2.0
+  - isort=5.13.2
+  - jupyter=1.0.0
+  - ipykernel=6.29.2
+
+  # pip-only packages (installed after conda)
+  - pip
+  - pip:
+      # SAM2 and MedSAM2 must be installed from source (see scripts/install_deps.sh)
+      # pip install -e sam2/
+      # pip install -e MedSAM2/
+
+      # Training
+      - einops==0.7.0
+      - omegaconf==2.3.0
+      - hydra-core==1.3.2
+      - wandb==0.16.4
+      - timm==0.9.16
+
+      # Medical metrics
+      - medpy==0.5.1
+      - surface-distance==0.1
+
+      # Data download
+      - zenodo-get==1.3.4
+      - gdown==4.7.3
+
+      # Evaluation
+      - monai==1.3.1
+
+      # Visualization
+      - pydicom==2.4.3

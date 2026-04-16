@@ -38,7 +38,7 @@ logs/
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
+# Note: *.ipynb tracked — only checkpoints ignored
 
 # IDE
 .vscode/
