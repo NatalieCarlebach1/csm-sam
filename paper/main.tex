@@ -1,18 +1,31 @@
-% TODO: swap to \usepackage{neurips_2026} when available
 \documentclass{article}
+
+% NeurIPS style. Default: [preprint] for drafts (shows author block, no page numbers).
+% For submission: drop the [preprint] option (ready for submission — anonymised).
+% For camera-ready: replace with [final].
+% NOTE: we use neurips_2024.sty as a placeholder until neurips_2026.sty is released.
+\usepackage[preprint]{neurips_2024}
+
+% Passed to natbib for numeric compressed citations [1,2,3].
+\PassOptionsToPackage{numbers,compress}{natbib}
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-\usepackage{microtype}
-\usepackage{booktabs}
-\usepackage{graphicx}
-\usepackage{amsmath,amssymb}
 \usepackage{hyperref}
 \usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath,amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
 \usepackage{multirow}
 
-\title{CSM-SAM: Cross-Session Memory for SAM2-Based Longitudinal and Bitemporal Segmentation}
+\title{CSM-SAM: Cross-Session Memory for SAM2-Based\\Longitudinal and Bitemporal Segmentation}
 
+% For [preprint] mode, authors are shown. For submission mode (default, no option),
+% the author block is hidden and `\author{}` content is ignored.
 \author{%
   Anonymous Authors\\
   Anonymous Institution\\
@@ -23,27 +36,19 @@
 \maketitle
 
 \begin{abstract}
-We introduce CSM-SAM, a cross-session memory extension of SAM2 for
-longitudinal and bitemporal segmentation. A frozen SAM2 ViT-H encoder and
-mask decoder are coupled with a small (\textasciitilde2M parameter)
-cross-session memory attention module and an auxiliary change-map head
-supervised by the XOR of pre- and mid-session masks, together with a
-continuous weeks-elapsed embedding. We evaluate on HNTS-MRG 2024 (Task 2
-mid-RT head and neck tumor segmentation), BraTS-GLI 2024 post-treatment
-glioma, and four remote-sensing / disaster change-detection benchmarks.
-Our goal is a single cross-session memory mechanism that transfers across
-domains without retraining the backbone.
+We introduce CSM-SAM, a cross-session memory extension of SAM2 for longitudinal and bitemporal segmentation. A frozen SAM2 ViT-H encoder and mask decoder are coupled with a small ($\sim$2M parameter) cross-session memory attention module and an auxiliary change-map head supervised by the XOR of pre- and mid-session masks, together with a continuous weeks-elapsed embedding. We evaluate on HNTS-MRG 2024 (Task 2 mid-RT head and neck tumor segmentation), BraTS-GLI 2024 post-treatment glioma, and four remote-sensing / disaster change-detection benchmarks. Our goal is a single cross-session memory mechanism that transfers across domains without retraining the backbone.
 \end{abstract}
 
 \input{sections/intro}
 \input{sections/related}
 \input{sections/method}
+\input{sections/experiments}
 \input{sections/results}
 \input{sections/ablations}
 \input{sections/discussion}
 \input{sections/conclusion}
 
-\bibliographystyle{plain}
+\bibliographystyle{plainnat}
 \bibliography{references}
 
 \end{document}

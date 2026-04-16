@@ -6,7 +6,7 @@ resection cavity). Reference nnU-Net 3-model ensemble numbers from
 de la Rosa et al.~\cite{delarosa2024brats}. The longitudinal value-add is
 the TP001 delta when TP000 is provided as a memory bank.}
 \label{tab:brats_gli}
-\small
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{lcccccc}
 \toprule
 Method & ET $\uparrow$ & TC $\uparrow$ & WT $\uparrow$ & RC $\uparrow$ & HD95 $\downarrow$ & \#params (tr.) \\
@@ -20,5 +20,6 @@ MedSAM2~\cite{ma2024medsam2}                                 & --    & --    & -
 \midrule
 \textbf{CSM-SAM (Ours, TP000 $\to$ TP001)}                   & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & 2M \\ % filled in after training
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table}

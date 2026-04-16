@@ -5,7 +5,7 @@ aggregated Dice (\(\mathrm{aggDSC}\) mean of GTVp + GTVn). Challenge
 winners reported from Wahid et al.~\cite{wahid2024hntsmrg}. Dashes
 indicate numbers we will fill in after training.}
 \label{tab:hnts_mrg}
-\small
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{lccccc}
 \toprule
 Method & aggDSC $\uparrow$ & GTVp Dice $\uparrow$ & GTVn Dice $\uparrow$ & HD95 $\downarrow$ & \#params (tr.) \\
@@ -53,5 +53,6 @@ hnts\_winner\_replica (BAMF-style)~\cite{wahid2024hntsmrg} & -- & -- & -- & -- &
 \midrule
 \textbf{CSM-SAM (Ours)}                              & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & 2M \\ % filled in after training
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table}

@@ -53,3 +53,14 @@ Thumbs.db
 # Misc
 *.tmp
 *.bak
+
+# LaTeX build artifacts
+paper/main.aux
+paper/main.bbl
+paper/main.blg
+paper/main.out
+paper/main.log
+paper/main.toc
+paper/main.pdf
+paper/sections/*.aux
+paper/tables/*.aux

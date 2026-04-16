@@ -6,25 +6,29 @@ LaTeX source for the CSM-SAM submission.
 
 ```
 paper/
-  main.tex               top-level document (abstract + \input'd sections)
-  references.bib         BibTeX entries for every method cited in results
-  Makefile               make / make clean / make view
+  main.tex                  top-level document (abstract + \input'd sections)
+  neurips_2024.sty          NeurIPS 2024 style file (placeholder until 2026 drops)
+  references.bib            BibTeX entries for every method cited
+  Makefile                  make / make clean / make view
   sections/
     intro.tex
-    related.tex
+    related.tex             6 subsections: SAM family, longitudinal medical,
+                            BraTS, CD remote sensing, semantic CD, positioning
     method.tex
-    results.tex          main deliverable (fully populated, numbers TBD)
+    experiments.tex         4 subsections: datasets, baselines, metrics, impl
+    results.tex             opening paragraph + per-dataset tables + takeaways
+                            + cross-dataset generalization subsection
     ablations.tex
     discussion.tex
     conclusion.tex
   tables/
-    hnts_mrg.tex         HNTS-MRG 2024 Task 2 (primary)
-    brats_gli.tex        BraTS-GLI 2024 post-treatment (secondary)
-    levir_cd.tex         LEVIR-CD binary building CD
-    s2looking.tex        S2Looking binary building CD
-    second.tex           SECOND semantic CD
-    xbd.tex              xBD / xView2 damage CD
-    ablation.tex         Single-axis ablation on HNTS-MRG
+    hnts_mrg.tex            HNTS-MRG 2024 Task 2 (primary)
+    brats_gli.tex           BraTS-GLI 2024 post-treatment (secondary)
+    levir_cd.tex            LEVIR-CD binary building CD
+    s2looking.tex           S2Looking binary building CD
+    second.tex              SECOND semantic CD
+    xbd.tex                 xBD / xView2 damage CD
+    ablation.tex            Single-axis ablation on HNTS-MRG
 ```
 
 ## Compiling
@@ -36,27 +40,24 @@ make view   # open the PDF
 make clean  # remove build artifacts
 ```
 
-## Swapping in the NeurIPS 2026 style file
+## NeurIPS format
 
-The NeurIPS 2026 style file is not public yet. `main.tex` currently uses
-`\documentclass{article}` with a `% TODO` comment at the top. When the
-2026 style drops:
+`main.tex` uses `\usepackage[preprint]{neurips_2024}` as a placeholder until `neurips_2026.sty` is released. The style file `neurips_2024.sty` ships with this directory (fetched from `https://media.neurips.cc/Conferences/NeurIPS2024/Styles.zip`).
 
-1. Drop `neurips_2026.sty` into `paper/`.
-2. In `main.tex` replace
+Three mode switches:
 
-   ```latex
-   \documentclass{article}
-   ```
+```latex
+\usepackage[preprint]{neurips_2024}  % DRAFT — author block shown, no page numbers
+\usepackage{neurips_2024}            % SUBMISSION — anonymised, page numbers removed
+\usepackage[final]{neurips_2024}     % CAMERA-READY — author block shown, paginated
+```
 
-   with the NeurIPS preamble, typically
-
-   ```latex
-   \documentclass{article}
-   \usepackage[final]{neurips_2026}  % or \usepackage{neurips_2026}
-   ```
-
+When `neurips_2026.sty` is released:
+1. Download it into `paper/`.
+2. Replace `neurips_2024` with `neurips_2026` in `main.tex`.
 3. Re-run `make`.
+
+Citations are numeric/compressed via `\bibliographystyle{plainnat}` + `\PassOptionsToPackage{numbers,compress}{natbib}`.
 
 ## Where to paste trained numbers
 

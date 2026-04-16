@@ -1,19 +1,223 @@
 \section{Related Work}
 \label{sec:related}
 
-Medical longitudinal segmentation is dominated by full-training 3D
-specialists such as nnU-Net~\cite{isensee2021nnunet}, Swin
-UNETR~\cite{hatamizadeh2021swinunetr}, UNETR~\cite{hatamizadeh2022unetr},
-and MedNeXt~\cite{roy2023mednext}, typically ignoring the prior session.
-Foundation-model segmentors --- SAM~\cite{kirillov2023sam},
-SAM2~\cite{ravi2024sam2}, MedSAM2~\cite{ma2024medsam2},
-DINOv2~\cite{oquab2024dinov2}, CLIPSeg~\cite{lueddecke2022clipseg},
-TotalSegmentator~\cite{wasserthal2023totalsegmentator} --- offer strong
-priors but do not model cross-session structure. On the remote-sensing
-side, bitemporal change detectors (FC-Siam~\cite{daudt2018fcsiam},
-SNUNet~\cite{fang2022snunet}, BIT~\cite{chen2021bit},
-ChangeFormer~\cite{bandara2022changeformer},
-Bi-SRNet~\cite{ding2022bisrnet}, SCanNet~\cite{ding2024scannet})
-fuse via siamese concat / difference / transformer tokens on small
-encoders. CSM-SAM unifies these lines by plugging a cross-session
-attention module on top of a frozen SAM2 encoder.
+CSM-SAM sits at the intersection of four lines of work: promptable
+foundation segmenters and their memory-augmented video extensions,
+longitudinal medical segmentation with registration priors,
+post-treatment tumor segmentation on BraTS, and bitemporal change
+detection in remote sensing. We review each and then position the
+contribution.
+
+\subsection{Segment Anything family and memory-augmented variants}
+\label{sec:related:sam}
+
+SAM~\cite{kirillov2023sam} introduced promptable segmentation at
+foundation scale: a ViT-H encoder, a prompt encoder, and a
+lightweight mask decoder trained on SA-1B ($\sim$1B masks, 11M
+images) via a model-in-the-loop data engine. It produces zero-shot
+masks from a point, box, or coarse-mask prompt but has no temporal
+context: each call operates on a single image in isolation.
+
+SAM~2~\cite{ravi2024sam2} extends the design to video by adding a
+memory bank and a memory-attention block. A streaming encoder writes
+object-conditioned ``memory tokens'' for past frames into a bounded
+queue; a memory-attention module inserted between the image encoder
+and the mask decoder lets the current frame's tokens attend into that
+queue through standard cross-attention, recovering object identity
+across occlusion or motion gaps without re-prompting. The memory bank
+is \emph{within-video}: all tokens come from the same continuous
+acquisition.
+
+MedSAM2~\cite{ma2024medsam2} adapts SAM~2 to 3D medical volumes by
+treating the slice stack as a short video. A prompt on one slice
+propagates through the volume via the same memory-attention block,
+yielding 3D masks from 2D prompts with decoder-only fine-tuning. The
+memory bank is still within-session clinically: all slices belong to
+a single acquisition of one patient at one visit.
+
+CSM-SAM continues this trajectory by introducing a \emph{cross-session}
+memory. The tokens written into the bank come from a \emph{different
+scan of the same subject} separated by one to four weeks of treatment,
+rather than neighbouring slices of one volume. The memory-attention
+block that SAM~2 uses to bridge temporal gaps within a video is reused
+verbatim to bridge the much larger inter-session gap between pre-RT
+(week 0) and mid-RT (week 2-3) scans, with two additions: an
+XOR-derived change-map head and a continuous weeks-elapsed embedding.
+SAM, SAM~2, and MedSAM2 do not expose this cross-session mode.
+
+\subsection{Longitudinal medical image segmentation}
+\label{sec:related:longi}
+
+In single-timepoint medical segmentation, 3D specialists dominate.
+nnU-Net~\cite{isensee2021nnunet} is a self-configuring pipeline
+around a volumetric U-Net that chooses preprocessing, patch size, and
+training schedule from a dataset fingerprint; trained from scratch on
+a few hundred volumes with heavy augmentation and five-fold
+ensembling, it remains the reference baseline on most medical
+benchmarks. Swin\,UNETR~\cite{hatamizadeh2021swinunetr} replaces the
+CNN encoder with a 3D Swin Transformer;
+UNETR~\cite{hatamizadeh2022unetr} uses a plain ViT encoder in the
+same U-Net layout; MedNeXt~\cite{roy2023mednext} is a ConvNeXt-style
+3D U-Net with depthwise convolutions and kernel up-scaling init. All
+four train end-to-end at 30-90M parameters with no built-in mechanism
+for consuming a prior visit.
+
+The HNTS-MRG 2024 challenge~\cite{wahid2024hntsmrg} formalizes the
+adaptive-radiotherapy setting CSM-SAM targets: given pre-RT (week 0)
+T2-weighted MRI with ground-truth masks, segment the mid-RT
+(week 2-3) scan of the same patient. The organizers ship a
+\texttt{preRT\_mask\_registered} field -- the pre-RT mask warped onto
+the mid-RT grid by deformable B-spline registration -- precisely
+because the task is longitudinal. Every published top-5 entry
+consumes this registered mask as an auxiliary input channel. The top
+team (UW\,LAIR, aggDSC~0.733) uses a
+SegResNet~\cite{myronenko2019segresnet} backbone with a mask-aware
+attention module that modulates decoder features by the warped pre-RT
+mask; teams 2-5 (0.727-0.710) are nnU-Net~3d\_fullres variants with
+the warped mask stacked on the input.
+
+The structural property these pipelines share is that pre/mid
+correspondence is \emph{engineered upstream}. Classical deformable
+registration produces the warped mask once, offline; the segmenter
+treats it as a static prior channel and never revisits the raw pre-RT
+image. This decouples correspondence from segmentation and exposes
+the system to registration error in low-contrast soft tissue --
+precisely the regime (post-chemoradiation head-and-neck tumor) where
+B-spline alignment is least reliable. It also discards the pre-RT
+intensity information: only the binary mask, not the pre-RT image
+itself, reaches the decoder. CSM-SAM instead learns pre/mid
+correspondence end-to-end through cross-time token attention on the
+frozen SAM~2 encoder grid, conditions this attention on weeks elapsed,
+and supervises it with the XOR-derived change map. No deformable
+registration is invoked at training or inference time.
+
+\subsection{BraTS and post-treatment tumor segmentation}
+\label{sec:related:brats}
+
+The BraTS 2024 post-treatment glioma track~\cite{delarosa2024brats}
+is the other major longitudinal medical benchmark: paired baseline
+(TP000) and follow-up (TP001) multi-parametric MRI with four
+co-registered sequences (T1c, T1n, T2w, T2f/FLAIR), evaluated by
+lesion-wise Dice on four sub-regions. Top solutions are nnU-Net,
+MedNeXt, and Swin\,UNETR 3D ensembles at 128$^3$ patches, each
+trained as a four-channel-in, multi-class-out volumetric segmenter.
+The critical observation -- explicit in the overview paper -- is that
+these pipelines process TP000 and TP001 \emph{independently}: a
+single model runs on each visit with no mechanism for conditioning
+the follow-up prediction on the baseline image tokens or mask.
+Longitudinal structure is unused at model level and resurfaces only
+in clinical post-processing. CSM-SAM's cross-session memory occupies
+this gap: TP000 tokens are written into a memory bank and TP001
+tokens attend into it, directly conditioning the follow-up prediction
+on the baseline encoding.
+
+\subsection{Change detection in remote sensing}
+\label{sec:related:cd}
+
+Remote-sensing change detection has developed a parallel bitemporal
+toolbox whose architectural choices mirror -- but do not anticipate
+-- CSM-SAM's. FC-Siam~\cite{daudt2018fcsiam} introduced the
+fully-convolutional siamese U-Net: two weight-shared encoder branches
+process pre- and post-event tiles, and the decoder fuses
+skip-connection features by concatenation (FC-Siam-conc) or absolute
+difference (FC-Siam-diff) at every scale, establishing the template
+subsequent binary CD architectures follow. SNUNet-CD~\cite{fang2022snunet}
+replaces the U-Net with a NestedUNet and adds an Ensemble Channel
+Attention Module (ECAM) over nested-skip features.
+
+Transformer-based CD moved fusion out of the CNN skips and into
+token space. BIT~\cite{chen2021bit} uses a ResNet-18 siamese CNN to
+extract bitemporal feature maps, projects each into a small set of
+``semantic tokens'' (4-8 per image), and refines them with a shared
+transformer encoder-decoder before reprojecting to pixel space.
+ChangeFormer~\cite{bandara2022changeformer} goes all-transformer: a
+hierarchical MiT encoder operates siamesely on both tiles and an MLP
+decoder fuses per-scale feature differences.
+TinyCD~\cite{codegoni2023tinycd} compresses the recipe into
+$\sim$0.3M parameters with a truncated EfficientNet siamese encoder
+and a Mix-and-Attention Mask Block.
+ChangeMamba~\cite{chen2024changemamba} replaces self-attention with
+Visual State-Space (Mamba) blocks and scans the stacked bitemporal
+feature tensor along multiple raster directions for linear-time
+long-range mixing.
+
+The line closest to CSM-SAM in spirit is SAM-CD~\cite{ding2024samcd},
+which freezes a SAM~v1 ViT encoder, attaches a FastSAM-style adapter
+and a change decoder, and trains with a semantic-consistency loss
+encouraging feature similarity between spatially overlapping
+non-changed regions across timestamps. It demonstrates that a frozen
+SAM encoder transfers to CD despite never seeing a bitemporal signal
+during pretraining. However, SAM-CD uses the original SAM (no
+memory-attention machinery), couples timestamps via a per-image
+feature-similarity loss rather than cross-time token attention, and
+has neither a change-map auxiliary head nor a temporal-gap embedding.
+CSM-SAM uses the more capable SAM~2 backbone, reuses its
+memory-attention block at the cross-session level, and adds both
+signals.
+
+The common thread across FC-Siam, SNUNet-CD, BIT, ChangeFormer,
+TinyCD, and ChangeMamba is a from-scratch-or-ImageNet backbone
+trained on small CD corpora, with bitemporal fusion implemented by
+differencing, concatenation, nested skips, low-rank transformer
+tokens, or directional SSM scans -- not by a memory-bank read.
+CSM-SAM replaces the small from-scratch backbone with a frozen
+1B-mask SAM~2 ViT and replaces the hand-designed fusion operator
+with the memory-attention mechanism SAM~2 uses for within-video
+persistence, adapted to the cross-session regime.
+
+\subsection{Semantic change detection}
+\label{sec:related:scd}
+
+Semantic change detection is the structurally closest analog to
+CSM-SAM: the task produces the full $\{\text{pre-mask},
+\text{post-mask}, \text{change-map}\}$ triple, exactly matching
+CSM-SAM's output signature. HRSCD~\cite{daudt2019hrscd} introduces a
+dual-branch multi-task FCN in which two semantic branches share
+encoder features with a dedicated change branch; its ``strategy~4''
+variant trains all three heads jointly with a consistency loss
+penalizing semantic pairs incompatible with the predicted change.
+Bi-SRNet~\cite{ding2022bisrnet} pairs a siamese ResNet encoder with
+a Siamese Relation-aware (SR) module for intra-temporal spatial
+context and a Cross-Temporal Relation module for inter-temporal
+exchange, feeding three heads (pre-semantic, post-semantic, binary
+change) with a semantic-consistency loss.
+SCanNet~\cite{ding2024scannet} extends this with a Semantic Change
+Transformer that attends symmetrically over concatenated bitemporal
+tokens, modelling ``pixel at date~1 vs pixel at date~2'' dependencies
+via three decoding heads and a joint semantic-change loss; it is
+currently the most widely reproduced SECOND result.
+
+Two properties of this family matter for positioning. First, the
+architectures are specialized siamese CNNs or CNN+transformer hybrids
+of 20-40M parameters trained from scratch on SECOND's 6-class urban
+land-cover label set; they do not transfer to medical tasks or to
+disaster-damage grading without architectural re-engineering and
+retraining. Second, bitemporal coupling is symmetric -- both dates
+are treated equivalently and feature exchange flows both ways.
+CSM-SAM's cross-session memory is asymmetric by design: the pre-RT
+visit writes a read-only memory bank that the mid-RT query attends
+into, mirroring the clinical workflow in which the pre-RT scan is
+always available first. The same module, unchanged, produces the
+$\{\text{pre}, \text{post}, \text{change}\}$ triple on top of a frozen
+foundation backbone never trained on land-cover or medical data.
+
+\subsection{Our positioning}
+\label{sec:related:positioning}
+
+Relative to the four lines above, CSM-SAM occupies a corner none of
+them covers jointly. It (i) builds on a frozen foundation backbone
+(SAM~2 ViT-H, pretrained on SA-1B masks and SA-V video, no medical
+fine-tuning of the encoder) instead of a from-scratch medical or CD
+specialist; (ii) reuses SAM~2's within-video memory-attention block
+as a \emph{cross-session} mechanism, learning pre/mid correspondence
+end-to-end rather than outsourcing it to deformable registration
+(HNTS-MRG winners) or symmetric siamese fusion (CD literature);
+(iii) adds an auxiliary change-map head supervised by the pre/mid
+mask XOR, a free signal every HNTS-MRG baseline throws away and no
+SAM/SAM~2 variant exposes; and (iv) conditions the memory attention
+on a continuous weeks-elapsed embedding, calibrating expected change
+magnitude against the 1-4-week treatment-response window. The
+trainable parameter count is $\sim$2M (memory module plus final
+decoder layer), and the same module transfers unchanged from
+HNTS-MRG to post-treatment BraTS, to SECOND, and to xBD, which is
+the generality claim the subsequent sections evaluate.

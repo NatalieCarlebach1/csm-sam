@@ -4,7 +4,7 @@
 test protocol. F1 and IoU are on the change class; precision and recall
 are pixel-level.}
 \label{tab:levir_cd}
-\small
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{lccccc}
 \toprule
 Method & F1 $\uparrow$ & IoU $\uparrow$ & Precision $\uparrow$ & Recall $\uparrow$ & \#params (tr.) \\
@@ -18,5 +18,6 @@ TinyCD                                  & 91.0 & 83.5 & -- & -- & 0.3M \\ % to f
 \midrule
 \textbf{CSM-SAM (Ours)}                 & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & 2M \\ % filled in after training
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table}

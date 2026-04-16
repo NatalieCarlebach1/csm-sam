@@ -4,7 +4,7 @@
 Test tile 256$\times$256. Published baselines are $\sim$20 F1 points
 below LEVIR-CD due to off-nadir viewing geometry and small buildings.}
 \label{tab:s2looking}
-\small
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{lccccc}
 \toprule
 Method & F1 $\uparrow$ & IoU $\uparrow$ & Precision $\uparrow$ & Recall $\uparrow$ & \#params (tr.) \\
@@ -16,5 +16,6 @@ ChangeFormer~\cite{bandara2022changeformer} & 65.0 & -- & -- & -- & 41M \\ % to 
 \midrule
 \textbf{CSM-SAM (Ours)}                 & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & 2M \\ % filled in after training
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table}

@@ -1,0 +1,284 @@
+\section{Experiments}
+\label{sec:experiments}
+
+This section describes the datasets (Section~\ref{sec:exp_datasets}),
+baselines (Section~\ref{sec:exp_baselines}), metrics
+(Section~\ref{sec:exp_metrics}), and implementation details
+(Section~\ref{sec:exp_impl}) used to evaluate CSM-SAM. All tables of
+numerical results live in Section~\ref{sec:results}; this section fixes
+the experimental protocol that those tables instantiate. Unless
+otherwise stated, every baseline and every CSM-SAM variant is evaluated
+with the same preprocessing, the same train/val/test splits, and the
+same metric implementations, so that differences reported in
+Section~\ref{sec:results} can be attributed to the architectural axes
+laid out in Section~\ref{sec:method}.
+
+\subsection{Datasets}
+\label{sec:exp_datasets}
+
+We evaluate CSM-SAM on eight datasets organised into three groups: a
+primary longitudinal medical benchmark, a secondary longitudinal
+medical benchmark, two single-timepoint medical pretraining corpora,
+and four bitemporal change-detection transfer benchmarks. Only the
+first group carries the central aggDSC claim; the remaining datasets
+probe the generality of the frozen-backbone plus cross-session-memory
+recipe.
+
+\subsubsection{Primary longitudinal benchmark}
+\label{sec:exp_hnts}
+
+\textbf{HNTS-MRG 2024 Task 2.} The primary benchmark is the
+HNTS-MRG 2024 head and neck tumor segmentation
+challenge~\cite{wahid2024hntsmrg}. It provides 150 training patients
+with paired pre-RT (week 0) and mid-RT (week 2--3) T2-weighted MR
+volumes, manual GTVp (primary tumor) and GTVn (nodal) contours, and an
+organizer-provided deformably registered pre-RT mask on the mid-RT
+grid. Task 2 evaluates mid-RT segmentation with the aggregated Dice
+$\mathrm{aggDSC} = \tfrac{1}{2}(\mathrm{DSCagg}_{\mathrm{GTVp}} +
+\mathrm{DSCagg}_{\mathrm{GTVn}})$ computed after concatenating the
+voxels of all test patients per structure; the challenge winner sits
+at $0.733$ aggDSC and the widely-quoted nnU-Net reference at $0.727$.
+
+\subsubsection{Secondary longitudinal benchmark}
+\label{sec:exp_brats}
+
+\textbf{BraTS-GLI 2024 post-treatment glioma.} The secondary
+longitudinal benchmark is BraTS-GLI 2024
+post-treatment~\cite{delarosa2024brats}, a brain-tumor follow-up task
+with roughly 118 longitudinal pre/post patient pairs and four MR
+modalities per visit (t1c, t1n, t2f, t2w). Each voxel carries one of
+five labels (background, non-enhancing tumor core, surrounding
+FLAIR hyperintensity, enhancing tumor, resection cavity), evaluated as
+lesion-wise Dice on the ET, TC, WT, and RC sub-regions. Because
+SAM2's image stem accepts three channels, we use the t2f sequence by
+default; 4-modality input through an added $1{\times}1$ conv or
+sequence-token stacking is left to future work.
+
+\subsubsection{Pretraining corpora (single-timepoint, medical)}
+\label{sec:exp_pretrain}
+
+\textbf{OAIZIB-CM knee MRI.} OAIZIB-CM contains 507 DESS knee MR
+volumes with five cartilage/bone ROIs (femur, tibia, femoral
+cartilage, medial tibial cartilage, lateral tibial cartilage) plus
+background~\cite{yao2023cartimorph}. We load it as
+\emph{self-paired}: pre $=$ mid, change mask $=$ 0, \texttt{single\_timepoint=True},
+which gates off the change-head and consistency losses and exercises
+only the Dice term plus the identity prior of the memory attention.
+
+\textbf{MS-Segmentation.} A supplementary 60-volume brain-MRI
+multiple-sclerosis lesion parquet set. There is no published
+leaderboard on this exact 60-example split, so it is used only as a
+brain-MRI intensity-statistics prior: the same self-paired contract as
+OAIZIB-CM with \texttt{single\_timepoint=True}, reporting no primary
+metric in Section~\ref{sec:results}. Together, the two pretraining
+corpora probe whether the frozen SAM2 ViT-H stem transfers to MR
+intensity distributions outside head and neck without destabilising
+the cross-session module.
+
+\subsubsection{Transfer benchmarks (bitemporal change detection)}
+\label{sec:exp_cd}
+
+We transfer the CSM-SAM mechanism, without architectural changes, to
+four remote-sensing / disaster bitemporal change-detection benchmarks.
+
+\textbf{LEVIR-CD~\cite{chen2020levircd}.} Binary building change
+detection on 0.5 m RGB aerial tiles; 445 / 64 / 128 tile split of
+$1024{\times}1024$ images, evaluated on $256{\times}256$ crops with F1
+and IoU on the change class.
+
+\textbf{S2Looking~\cite{shen2021s2looking}.} Off-nadir binary building
+change detection on rural satellite imagery; 3500 / 500 / 1000 tile
+split. Off-nadir viewing geometry and small buildings push SOTA
+roughly 20 F1 points below LEVIR-CD, which stresses viewpoint
+robustness of the underlying foundation backbone.
+
+\textbf{SECOND~\cite{yang2021second}.} Semantic change detection with
+six land-cover classes plus background on $512{\times}512$ tiles;
+2968 pairs with a 1:1 train/test split. The evaluation protocol
+follows prior work: mean IoU over semantic-change pixels
+($\mathrm{mIoU}_{\mathrm{sc}}$) and the Separated Kappa coefficient
+(SeK). SECOND is the closest structural analogue of CSM-SAM's output
+signature because it requires \emph{both} per-timepoint semantic maps
+and a binary change map.
+
+\textbf{xBD / xView2~\cite{gupta2019xbd}.} Building damage assessment
+on $1024{\times}1024$ pre- and post-disaster satellite imagery with a
+four-level ordinal damage label (no, minor, major, destroyed) plus an
+``un-classified'' category. The official xView2 score is
+$0.3 \cdot \mathrm{loc\_F1} + 0.7 \cdot \mathrm{dmg\_F1}$, where
+$\mathrm{dmg\_F1}$ is a harmonic mean across the four damage classes.
+
+These four datasets together cover binary vs.\ semantic CD, nadir vs.\
+off-nadir geometry, per-pixel vs.\ per-building evaluation, and
+two-class vs.\ ordinal label sets, which lets us ask whether a single
+cross-session memory module survives each of those axis changes without
+retraining the SAM2 backbone.
+
+\subsection{Baselines}
+\label{sec:exp_baselines}
+
+We compare CSM-SAM against 36 baselines spanning six categories:
+naive / sanity, classical medical segmentation, foundation-model
+zero-shot, longitudinal / bitemporal medical, binary change detection,
+and semantic change detection. The taxonomy follows the landscape
+document shipped with the repository (see Section~\ref{sec:related});
+each category isolates a different axis along which CSM-SAM is
+claimed to differ from prior work.
+
+\textbf{Naive / sanity (5).} \texttt{identity} (pre-RT mask verbatim
+as mid-RT prediction), \texttt{zero}, \texttt{random} (Bernoulli at
+empirical foreground density), \texttt{copy\_prev\_slice}, and
+\texttt{majority\_voxel} (training-set union prior). These establish
+the metric floor and quantify how much ``free'' Dice comes from
+tumor-free slices or from trivial cross-session reuse; a learned
+method that barely beats them has no per-patient signal.
+
+\textbf{Classical medical segmentation (5).} 2D U-Net
+(ResNet-34 encoder), DeepLabV3+ (ResNet-50 + ASPP),
+Swin UNETR~\cite{hatamizadeh2021swinunetr},
+UNETR~\cite{hatamizadeh2022unetr}, and
+MedNeXt~\cite{roy2023mednext}. All are strong ImageNet-initialised or
+scratch-trained medical specialists with no pre-session signal. They
+isolate ``how much does cross-session information buy?'' at a fixed
+medical-specialist capacity.
+
+\textbf{Foundation-model zero-shot (6).} SAM~\cite{kirillov2023sam},
+SAM2 point prompt, SAM2 video~\cite{ravi2024sam2},
+DINOv2~\cite{oquab2024dinov2} with a linear decoder,
+CLIPSeg~\cite{lueddecke2022clipseg}, and
+TotalSegmentator~\cite{wasserthal2023totalsegmentator}. These freeze a
+strong natural-image or medical-image prior and probe whether the
+pretraining alone suffices. The delta between them and CSM-SAM
+isolates the contribution of the cross-session memory module on top
+of the same frozen prior.
+
+\textbf{Longitudinal / bitemporal medical (6).}
+MedSAM2~\cite{ma2024medsam2} (within-session memory only),
+\texttt{concat\_channels} (pre and mid stacked as a 2-channel input),
+\texttt{siamese\_unet}, \texttt{pre\_mask\_prior} (the HNTS-MRG 2024
+winner-style pre-RT-mask-as-channel baseline),
+\texttt{longisam} (our SAM2-with-6-channel-fusion ablation that
+replaces cross-session attention with a $1{\times}1$ conv), and
+\texttt{nnunet\_dual\_channel}~\cite{isensee2021nnunet}. Every entry
+shares CSM-SAM's goal of using the pre-RT visit but implements that
+with simpler mechanisms than learned cross-session token attention;
+\texttt{longisam} in particular is the single-axis ablation that
+isolates the attention module from the SAM2 backbone.
+
+\textbf{Binary change detection (6).}
+FC-Siam-diff and FC-Siam-conc~\cite{daudt2018fcsiam},
+SNUNet-CD~\cite{fang2022snunet},
+BIT~\cite{chen2021bit},
+ChangeFormer~\cite{bandara2022changeformer}, and
+TinyCD. These are the dominant remote-sensing binary-CD
+architectures: siamese CNNs / transformers that fuse time points by
+feature differencing, concatenation, nested skips, channel attention,
+or a low-rank transformer-token bottleneck. None of them sits on top
+of a 1B-mask-pretrained foundation backbone.
+
+\textbf{Semantic change detection (4).}
+Bi-SRNet~\cite{ding2022bisrnet},
+SCanNet~\cite{ding2024scannet},
+CED-Net / HRSCD~\cite{daudt2019hrscd}, and
+Dual-HRNet~\cite{koo2020dualhrnet} on xBD. These predict
+\emph{both} per-timepoint semantic maps \emph{and} a change map,
+which is structurally the closest analogue to CSM-SAM's
+\{mid-mask, change-map\} output; they differ in the backbone (small
+from-scratch siamese vs.\ frozen SAM2 ViT-H) and in whether the
+cross-time coupling is symmetric (both branches query each other) or
+asymmetric (pre writes to a memory bank that mid reads), which is the
+axis CSM-SAM explores.
+
+For every baseline above, the source file in \texttt{baselines/}
+carries a top-of-file ``uniqueness note'' that states precisely what
+CSM-SAM does that the baseline does not --- e.g.\ ``no cross-session
+token attention'', ``no auxiliary change head'', ``no weeks-elapsed
+embedding''. These notes are summarised in Section~\ref{sec:related}
+into the six-axis landscape diagram so that every reported number in
+Section~\ref{sec:results} can be mapped back to the specific
+architectural axis it ablates.
+
+\subsection{Metrics}
+\label{sec:exp_metrics}
+
+\textbf{Medical (primary).} On HNTS-MRG 2024 we follow the challenge
+protocol~\cite{wahid2024hntsmrg} and report
+$\mathrm{aggDSC} = \tfrac{1}{2}(\mathrm{DSCagg}_{\mathrm{GTVp}} +
+\mathrm{DSCagg}_{\mathrm{GTVn}})$, where $\mathrm{DSCagg}$ for each
+structure is computed after concatenating all test-set voxels for that
+structure (not averaging per-patient Dice). We additionally report
+per-structure Dice and the 95th-percentile Hausdorff distance (HD95)
+as secondary metrics. On BraTS-GLI 2024 we report lesion-wise Dice on
+the four sub-regions (ET, TC, WT, RC) following~\cite{delarosa2024brats}.
+
+\textbf{Binary change detection.} On LEVIR-CD~\cite{chen2020levircd}
+and S2Looking~\cite{shen2021s2looking} we report F1 and IoU on the
+change class, following prior CD literature so that our numbers are
+directly comparable to the baseline table entries
+\cite{daudt2018fcsiam,fang2022snunet,chen2021bit,bandara2022changeformer}.
+
+\textbf{Semantic and ordinal change detection.} On
+SECOND~\cite{yang2021second} we report the semantic-change mean IoU
+($\mathrm{mIoU}_{\mathrm{sc}}$) and the Separated Kappa coefficient
+(SeK), matching~\cite{ding2022bisrnet,ding2024scannet}. On
+xBD~\cite{gupta2019xbd} we report the official xView2 weighted score
+$0.3 \cdot \mathrm{loc\_F1} + 0.7 \cdot \mathrm{dmg\_F1}$, where
+$\mathrm{dmg\_F1}$ is itself the harmonic mean over the four damage
+classes and buildings in the ``un-classified'' category count toward
+localisation but not toward damage.
+
+\textbf{Ablation-specific.} For the change head we report IoU of the
+predicted change map against the binary XOR of pre and mid masks. For
+the feature-evolution regulariser we report the consistency MSE
+between the predicted mid features and the ground-truth SAM2 encoder
+features on tumor regions. Both are internal signals, reported only
+in Section~\ref{sec:ablations}.
+
+\subsection{Implementation setup}
+\label{sec:exp_impl}
+
+\textbf{Inputs.} CSM-SAM operates at $1024 \times 1024$ per slice,
+matching SAM2's native resolution~\cite{ravi2024sam2}. 3D MR volumes
+are sliced axially and fed to the network one slice at a time during
+inference; during training we use both slice-level batches (for the
+per-slice Dice and change losses) and sequence-level batches (for the
+within-session memory bank that accumulates $M_{\text{mid}}$ across
+consecutive mid-RT slices).
+
+\textbf{Parameter budget.} The SAM2 ViT-H image encoder
+(${\sim}600$M parameters) is frozen; the mask decoder is frozen except
+for its final layer. The trainable stack totals roughly 2M
+parameters: \texttt{CrossSessionMemoryAttention} (cross-session
+attention to $M_{\text{aug}}$, within-session attention to
+$M_{\text{mid}}$, a learned gate), the \texttt{ChangeHead}, the
+continuous weeks-elapsed encoder (sinusoidal plus an MLP), and the
+final mask-decoder layer.
+
+\textbf{Optimisation.} AdamW with learning rate $10^{-4}$, weight
+decay $0.05$, and a cosine schedule with 5-epoch warmup. The combined
+loss is $\mathcal{L} = \mathcal{L}_{\text{Dice}} +
+0.3 \cdot \mathcal{L}_{\text{CE}}(\text{change\_map}) +
+0.2 \cdot \mathcal{L}_{\text{consistency}}$. On single-timepoint
+pretraining batches (OAIZIB-CM, MS-Segmentation) the
+$\mathcal{L}_{\text{CE}}$ term is gated off by the
+\texttt{single\_timepoint} flag, so only the Dice term and the
+identity prior of the attention module are exercised.
+
+\textbf{Training schedule.} 200 epochs on a single GPU, with a
+slice-level batch size of 4 and a sequence-level batch size of 1. We
+run 5-fold cross-validation on HNTS-MRG and report fold-0 held-out
+aggDSC in Section~\ref{sec:results}; remaining folds are used for
+ablation sensitivity analysis in Section~\ref{sec:ablations}.
+
+\textbf{Test-time augmentation.} At inference we average predictions
+over horizontal flip, vertical flip, and $90^{\circ}$ rotation.
+
+\textbf{Synthetic smoke-test data.} For pipeline validation we ship a
+15-patient synthetic HNTS-MRG replica, generated by
+\texttt{data/download\_hnts\_mrg.py -{}-synthetic}, that reproduces
+the voxel spacing, label set, and pre/mid pairing of the real
+challenge data without any patient imagery. Whenever real HNTS-MRG
+preprocessing is not available on the execution environment, the
+hyperparameter sweep in Section~\ref{sec:results} falls back to this
+synthetic split; we flag those runs explicitly so they are not
+conflated with aggDSC on the true challenge test set.
