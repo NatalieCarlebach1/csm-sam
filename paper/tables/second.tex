@@ -1,0 +1,20 @@
+\begin{table}[t]
+\centering
+\caption{SECOND semantic change detection (6 land-cover classes + bg).
+$\mathrm{mIoU}_{\mathrm{sc}}$ is mean IoU over semantic-change classes;
+SeK is the Separated Kappa; $F1_{\mathrm{binary}}$ is the binary change
+F1 ignoring class labels.}
+\label{tab:second}
+\small
+\begin{tabular}{lcccc}
+\toprule
+Method & $\mathrm{mIoU}_{\mathrm{sc}}$ $\uparrow$ & SeK $\uparrow$ & $F1_{\mathrm{binary}}$ $\uparrow$ & \#params (tr.) \\
+\midrule
+CED-Net / HRSCD-str4~\cite{daudt2018fcsiam}      & 71.2 & 18.8 & -- & -- \\ % to fill F1 bin
+Bi-SRNet~\cite{ding2022bisrnet}                  & 72.8 & 20.1 & -- & -- \\ % to fill
+SCanNet~\cite{ding2024scannet}                   & 73.4 & 20.6 & -- & -- \\ % to fill
+\midrule
+\textbf{CSM-SAM (Ours)}                          & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & 2M \\ % filled in after training
+\bottomrule
+\end{tabular}
+\end{table}

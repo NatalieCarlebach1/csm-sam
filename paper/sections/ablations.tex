@@ -1,0 +1,12 @@
+\section{Ablations}
+\label{sec:ablations}
+
+Table~\ref{tab:ablation} reports single-axis ablations of CSM-SAM on
+HNTS-MRG 2024 Task 2. Each row removes or replaces one component:
+cross-session memory is disabled to recover a MedSAM2-style
+within-session propagator~\cite{ma2024medsam2}; the change head is
+removed to test whether the XOR auxiliary signal is load-bearing; the
+continuous weeks-elapsed embedding is removed to test temporal
+calibration; and, as a non-attention control, pre/mid are fed as a
+dual-modality input to the SAM2 encoder instead of via memory.
+\input{tables/ablation}

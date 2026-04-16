@@ -1,0 +1,24 @@
+\begin{table}[t]
+\centering
+\caption{BraTS-GLI 2024 post-treatment glioma, lesion-wise Dice per
+sub-region (ET: enhancing tissue, TC: tumor core, WT: whole tumor, RC:
+resection cavity). Reference nnU-Net 3-model ensemble numbers from
+de la Rosa et al.~\cite{delarosa2024brats}. The longitudinal value-add is
+the TP001 delta when TP000 is provided as a memory bank.}
+\label{tab:brats_gli}
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Method & ET $\uparrow$ & TC $\uparrow$ & WT $\uparrow$ & RC $\uparrow$ & HD95 $\downarrow$ & \#params (tr.) \\
+\midrule
+nnU-Net 3d\_fullres (TP001 only)~\cite{isensee2021nnunet}    & 0.790 & 0.790 & 0.880 & 0.872 & -- & 30M \\
+nnU-Net ensemble (3 models)~\cite{isensee2021nnunet}         & 0.790 & 0.790 & 0.880 & 0.872 & -- & 90M \\
+MedNeXt~\cite{roy2023mednext}                                & --    & --    & --    & --    & -- & 60M \\ % to fill
+Swin UNETR~\cite{hatamizadeh2021swinunetr}                   & --    & --    & --    & --    & -- & 62M \\ % to fill
+MONAI AutoML ensemble~\cite{cardoso2022monai}                & --    & --    & --    & --    & -- & -- \\  % to fill
+MedSAM2~\cite{ma2024medsam2}                                 & --    & --    & --    & --    & -- & -- \\  % to fill
+\midrule
+\textbf{CSM-SAM (Ours, TP000 $\to$ TP001)}                   & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & 2M \\ % filled in after training
+\bottomrule
+\end{tabular}
+\end{table}

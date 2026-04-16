@@ -1,0 +1,57 @@
+\begin{table}[t]
+\centering
+\caption{HNTS-MRG 2024 Task 2 mid-RT segmentation. Primary metric is
+aggregated Dice (\(\mathrm{aggDSC}\) mean of GTVp + GTVn). Challenge
+winners reported from Wahid et al.~\cite{wahid2024hntsmrg}. Dashes
+indicate numbers we will fill in after training.}
+\label{tab:hnts_mrg}
+\small
+\begin{tabular}{lccccc}
+\toprule
+Method & aggDSC $\uparrow$ & GTVp Dice $\uparrow$ & GTVn Dice $\uparrow$ & HD95 $\downarrow$ & \#params (tr.) \\
+\midrule
+\multicolumn{6}{l}{\emph{Naive / sanity (no learning)}} \\
+zero                                   & 0.000 & 0.000 & 0.000 & --    & 0 \\
+random                                 & --    & --    & --    & --    & 0 \\ % to fill
+majority-voxel (dataset prior)         & --    & --    & --    & --    & 0 \\ % to fill
+identity (pre-RT mask)                 & --    & --    & --    & --    & 0 \\ % to fill
+copy-prev-slice                        & --    & --    & --    & --    & 0 \\ % to fill
+registration-warp (B-spline)           & --    & --    & --    & --    & 0 \\ % to fill
+\midrule
+\multicolumn{6}{l}{\emph{Classical medical segmentation (mid-RT only)}} \\
+2D U-Net~\cite{isensee2021nnunet}              & --    & --    & --    & --    & 24M \\ % to fill
+DeepLabV3+ (paraphrased)                       & --    & --    & --    & --    & 40M \\ % to fill
+Swin UNETR~\cite{hatamizadeh2021swinunetr}     & --    & --    & --    & --    & 62M \\ % to fill
+UNETR~\cite{hatamizadeh2022unetr}              & --    & --    & --    & --    & 93M \\ % to fill
+MedNeXt~\cite{roy2023mednext}                  & --    & --    & --    & --    & 60M \\ % to fill
+nnU-Net 3d\_fullres~\cite{isensee2021nnunet}   & --    & --    & --    & --    & 30M \\ % to fill
+TransUNet~\cite{chen2021transunet}             & --    & --    & --    & --    & -- \\  % to fill
+\midrule
+\multicolumn{6}{l}{\emph{Foundation-model (no cross-session)}} \\
+SAM (ViT-H) point prompt~\cite{kirillov2023sam}    & --    & --    & --    & --    & 0 \\ % to fill
+SAM2 point prompt~\cite{ravi2024sam2}              & --    & --    & --    & --    & 0 \\ % to fill
+SAM2 video~\cite{ravi2024sam2}                     & --    & --    & --    & --    & 0 \\ % to fill
+MedSAM2~\cite{ma2024medsam2}                       & --    & --    & --    & --    & -- \\ % to fill
+DINOv2 linear probe~\cite{oquab2024dinov2}         & --    & --    & --    & --    & -- \\ % to fill
+CLIPSeg~\cite{lueddecke2022clipseg}                & --    & --    & --    & --    & 0 \\ % to fill
+TotalSegmentator~\cite{wasserthal2023totalsegmentator} & -- & -- & -- & --    & 0 \\ % to fill
+\midrule
+\multicolumn{6}{l}{\emph{Longitudinal / bitemporal on HNTS-MRG}} \\
+concat-channels U-Net                                  & -- & -- & -- & --    & 24M \\ % to fill
+pre-mask-prior U-Net                                   & -- & -- & -- & --    & 24M \\ % to fill
+siamese U-Net~\cite{daudt2018fcsiam}                   & -- & -- & -- & --    & 24M \\ % to fill
+nnU-Net dual-channel~\cite{isensee2021nnunet}          & -- & -- & -- & --    & 30M \\ % to fill
+LongiSAM (SAM2 + 1x1 fusion, ours ablation)            & -- & -- & -- & --    & 6M  \\ % to fill
+\midrule
+\multicolumn{6}{l}{\emph{Published challenge winners (Wahid et al.~\cite{wahid2024hntsmrg})}} \\
+mic-dkfz (nnU-Net)~\cite{isensee2021nnunet}            & 0.727 & -- & -- & -- & 30M \\ % 2nd place
+HiLab (nnU-Net ensemble)~\cite{isensee2021nnunet}      & 0.725 & -- & -- & -- & -- \\
+andrei.iantsen (nnU-Net)~\cite{isensee2021nnunet}      & 0.718 & -- & -- & -- & -- \\
+Stockholm\_Trio (nnU-Net + warp)~\cite{isensee2021nnunet} & 0.710 & -- & -- & -- & -- \\
+UW LAIR (SegResNet + mask attn)~\cite{wahid2024hntsmrg} & 0.733 & -- & -- & -- & -- \\
+hnts\_winner\_replica (BAMF-style)~\cite{wahid2024hntsmrg} & -- & -- & -- & -- & 30M \\ % to fill
+\midrule
+\textbf{CSM-SAM (Ours)}                              & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & 2M \\ % filled in after training
+\bottomrule
+\end{tabular}
+\end{table}

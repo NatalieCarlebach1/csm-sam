@@ -1,0 +1,138 @@
+\section{Results}
+\label{sec:results}
+
+\paragraph{Evaluation protocol.}
+We evaluate CSM-SAM on a portfolio of bitemporal benchmarks. The
+\emph{primary} benchmark is HNTS-MRG 2024 Task 2 (mid-RT head and neck
+tumor segmentation~\cite{wahid2024hntsmrg}), scored by aggregated Dice
+(\(\mathrm{aggDSC}\)). A \emph{secondary} medical-longitudinal benchmark,
+BraTS-GLI 2024 post-treatment~\cite{delarosa2024brats}, measures whether
+cross-session memory generalises to brain-tumor follow-up
+(TP000~$\to$~TP001). To probe whether the same memory module transfers
+beyond medicine, we report four remote-sensing / disaster
+change-detection benchmarks: LEVIR-CD and S2Looking (binary building
+CD), SECOND (semantic land-cover CD), and xBD (ordinal damage CD).
+Supplementary pretraining corpora --- OAIZIB-CM~\cite{ambellan2019oaizib,yao2023cartimorph} and an in-house MS-Segmentation set --- warm up the
+encoder to MR intensity statistics and the memory attention to identity
+(pre == mid) pairs; these are \emph{not} reported as primary metrics.
+Tables~\ref{tab:hnts_mrg}--\ref{tab:xbd} summarise the comparisons.
+All published numbers are taken from the cited primary sources; empty
+cells are marked \texttt{--} and will be filled after training.
+
+\subsection{HNTS-MRG 2024 Task 2 (primary)}
+\label{sec:results_hnts}
+
+Table~\ref{tab:hnts_mrg} reports Task 2 mid-RT performance. The primary
+metric is \(\mathrm{aggDSC} = \tfrac{1}{2}(\mathrm{DSCagg}_{\mathrm{GTVp}}
++ \mathrm{DSCagg}_{\mathrm{GTVn}})\); we also report per-class Dice,
+95th-percentile Hausdorff distance, and the trainable parameter count.
+\input{tables/hnts_mrg}
+
+\paragraph{Baseline families.} The table is grouped into five blocks
+that mirror the landscape in Section~\ref{sec:related}. \emph{Naive /
+sanity} baselines set the floor: \texttt{zero} and \texttt{random}
+establish the unconditional and uninformed-but-nonzero floors;
+\texttt{majority-voxel} asks whether a patient-agnostic training-set
+shape prior already explains numbers; \texttt{identity} is the
+``no-learning cross-session'' floor (pre-RT mask verbatim);
+\texttt{copy-prev-slice} is the degenerate within-session propagator;
+and \texttt{registration-warp} is the strongest no-learning
+cross-session baseline via deformable B-spline warp. The
+\emph{classical medical segmentation} block isolates how far
+from-scratch 2D and 3D specialists go without any pre-RT signal:
+2D U-Net / DeepLabV3+ (slice-wise, ImageNet-pretrained) and the 3D
+specialists Swin UNETR~\cite{hatamizadeh2021swinunetr},
+UNETR~\cite{hatamizadeh2022unetr}, MedNeXt~\cite{roy2023mednext},
+nnU-Net~\cite{isensee2021nnunet}, and
+TransUNet~\cite{chen2021transunet}. The \emph{foundation-model} block
+probes whether a frozen strong prior transfers zero-shot:
+SAM~\cite{kirillov2023sam}, SAM2 point / video~\cite{ravi2024sam2},
+MedSAM2~\cite{ma2024medsam2}, DINOv2~\cite{oquab2024dinov2},
+CLIPSeg~\cite{lueddecke2022clipseg}, and
+TotalSegmentator~\cite{wasserthal2023totalsegmentator}. The
+\emph{longitudinal / bitemporal on HNTS-MRG} block adds the pre-RT
+visit through channel concat, pre-mask concat, siamese features,
+nnU-Net dual-channel, and our LongiSAM ablation (same SAM2 backbone,
+pre/mid fused by a 1$\times$1 conv instead of attention) ---
+LongiSAM is the cleanest single-axis isolation of the attention
+contribution. The \emph{published challenge winners} block copies
+top-5 HNTS-MRG 2024 leaderboard numbers from
+Wahid et al.~\cite{wahid2024hntsmrg}. The beat-bar for a new SOTA
+is $>0.733$ aggDSC.
+
+\subsection{BraTS-GLI 2024 post-treatment}
+\label{sec:results_brats}
+
+Table~\ref{tab:brats_gli} reports lesion-wise Dice on the four BraTS-GLI
+sub-regions (ET, TC, WT, RC)~\cite{delarosa2024brats}. The
+resection cavity is scored separately and is not merged into WT or TC.
+\input{tables/brats_gli}
+
+\paragraph{Baseline choices.} nnU-Net 3-model ensemble~\cite{isensee2021nnunet}
+is the canonical BraTS-top solution; we also include single-model
+nnU-Net as the fair-compute comparison. MedNeXt~\cite{roy2023mednext}
+and Swin UNETR~\cite{hatamizadeh2021swinunetr} represent the 3D
+transformer / ConvNeXt specialists. The MONAI
+ensemble~\cite{cardoso2022monai} is the reproducible AutoML baseline
+reviewers expect. MedSAM2~\cite{ma2024medsam2} is the
+within-session-memory SAM2 control; the delta between MedSAM2 and
+CSM-SAM on the \textbf{TP000~$\to$~TP001} setting isolates the
+cross-session contribution. Unlike HNTS-MRG this challenge does not
+mandate a pre-session signal; most published BraTS solutions segment
+each timepoint independently, which is precisely the gap CSM-SAM
+targets.
+
+\subsection{Transfer to change detection}
+\label{sec:results_cd}
+
+Tables~\ref{tab:levir_cd}, \ref{tab:s2looking}, \ref{tab:second},
+and~\ref{tab:xbd} evaluate whether the same cross-session memory
+module transfers to remote-sensing and disaster change detection
+without architectural changes. We deliberately do not pretrain on the
+target domain --- the backbone stays SAM2 Hiera-L, and only the memory
+module is trained on each benchmark's training split.
+\input{tables/levir_cd}
+\paragraph{LEVIR-CD.} FC-Siam-Diff / FC-Siam-Conc~\cite{daudt2018fcsiam}
+are the classical siamese-difference and siamese-concat
+change-detection architectures. SNUNet-CD~\cite{fang2022snunet}
+adds nested (UNet++) skips and channel-attention mixing on small
+encoders. BIT~\cite{chen2021bit} introduces a semantic tokenizer on
+top of a ResNet-18 siamese stem followed by a joint transformer
+block --- the closest classical analogue to our attention idea.
+ChangeFormer~\cite{bandara2022changeformer} is the SegFormer-style
+hierarchical transformer baseline. Each of these is a small
+from-scratch or ImageNet-pretrained encoder without a 1B-mask prior,
+which is exactly the axis CSM-SAM contrasts on.
+
+\input{tables/s2looking}
+\paragraph{S2Looking.} The off-nadir rural-building regime is
+roughly 20 F1 points harder than LEVIR-CD. FC-Siam-Diff collapses to
+$13.2$ F1, while attention-based transformer detectors
+(BIT~\cite{chen2021bit},
+ChangeFormer~\cite{bandara2022changeformer}) reach the mid-60s. This
+is where the strength of the frozen SAM2 prior should matter most.
+
+\input{tables/second}
+\paragraph{SECOND.} Semantic change detection requires predicting a
+semantic label at each timepoint \emph{and} a change map, so the
+metric suite is mean IoU over semantic-change classes and the
+Separated Kappa (SeK). Bi-SRNet~\cite{ding2022bisrnet} and
+SCanNet~\cite{ding2024scannet} are the two most-reproduced
+baselines; SCanNet's spatio-temporal transformer is a direct
+analogue to our cross-session attention, but without a frozen
+foundation backbone.
+
+\input{tables/xbd}
+\paragraph{xBD / xView2.} Dual-HRNet~\cite{gupta2019xbd} is the
+widely-reproduced xView2 challenge baseline with a siamese
+multi-resolution HRNet encoder and split localization / damage
+heads. Damage grading is ordinal (no / minor / major / destroyed),
+and the official score weights damage F1 at 0.7. CSM-SAM reuses the
+same memory module and swaps the segmentation head for an ordinal
+damage head --- no architectural change to the memory itself.
+
+\paragraph{Takeaway.} Across six benchmarks spanning medical
+longitudinal and remote-sensing bitemporal tasks, the CSM-SAM row in
+each table uses the \emph{same} cross-session memory module with only
+task-specific heads. Empty cells will be filled from training runs;
+the structure of the comparison is fixed.

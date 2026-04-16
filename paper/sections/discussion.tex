@@ -1,0 +1,12 @@
+\section{Discussion}
+\label{sec:discussion}
+
+The cross-session memory mechanism is architecturally agnostic to the
+backbone. We use SAM2~\cite{ravi2024sam2} because its 1B-mask prior
+dominates the small-data HNTS-MRG regime, but the same module could in
+principle sit atop DINOv2~\cite{oquab2024dinov2} or a domain-specific
+ViT. Limitations include: (i) the pre-RT mask must be available at
+inference, which is standard in adaptive radiotherapy but not in every
+longitudinal setting; (ii) memory size scales with the pre-session
+encoder grid; (iii) temporal calibration is evaluated only on HNTS-MRG's
+1--4 week range.

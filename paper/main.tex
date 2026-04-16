@@ -1,0 +1,49 @@
+% TODO: swap to \usepackage{neurips_2026} when available
+\documentclass{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{multirow}
+
+\title{CSM-SAM: Cross-Session Memory for SAM2-Based Longitudinal and Bitemporal Segmentation}
+
+\author{%
+  Anonymous Authors\\
+  Anonymous Institution\\
+  \texttt{anon@example.org}
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We introduce CSM-SAM, a cross-session memory extension of SAM2 for
+longitudinal and bitemporal segmentation. A frozen SAM2 ViT-H encoder and
+mask decoder are coupled with a small (\textasciitilde2M parameter)
+cross-session memory attention module and an auxiliary change-map head
+supervised by the XOR of pre- and mid-session masks, together with a
+continuous weeks-elapsed embedding. We evaluate on HNTS-MRG 2024 (Task 2
+mid-RT head and neck tumor segmentation), BraTS-GLI 2024 post-treatment
+glioma, and four remote-sensing / disaster change-detection benchmarks.
+Our goal is a single cross-session memory mechanism that transfers across
+domains without retraining the backbone.
+\end{abstract}
+
+\input{sections/intro}
+\input{sections/related}
+\input{sections/method}
+\input{sections/results}
+\input{sections/ablations}
+\input{sections/discussion}
+\input{sections/conclusion}
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

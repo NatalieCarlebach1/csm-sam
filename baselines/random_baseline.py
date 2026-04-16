@@ -1,0 +1,116 @@
+"""
+Random-Prediction Baseline.
+
+What this baseline does:
+    Emits a random binary mask per mid-RT slice at a configurable foreground
+    density (default 5%, ~empirical tumor voxel prevalence). Independent
+    Bernoulli draws per voxel — no spatial structure, no image conditioning.
+
+How CSM-SAM differs:
+    CSM-SAM's predictions are spatially coherent, image-conditioned, and
+    driven by pre-RT memory. This baseline establishes the floor for
+    "uninformed but nonzero" predictions: any learned method (and CSM-SAM in
+    particular) must clearly beat noise at the correct foreground density.
+
+Usage:
+    python baselines/random_baseline.py \
+        --data_dir data/processed \
+        --output_dir results/baselines/random \
+        --density 0.05
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+from tqdm import tqdm
+
+from csmsam.datasets import HNTSMRGDataset
+from csmsam.utils.metrics import aggregate_metrics, evaluate_patient
+
+
+def run_random_baseline(
+    data_dir: str,
+    output_dir: str,
+    split: str = "test",
+    density: float = 0.05,
+    seed: int = 0,
+    image_size: int = 1024,
+):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 60)
+    print(f"Random Baseline (density={density})")
+    print(f"Split: {split}")
+    print("=" * 60)
+
+    rng = np.random.default_rng(seed)
+    dataset = HNTSMRGDataset(data_dir=data_dir, split=split, image_size=image_size)
+    per_patient_metrics = []
+
+    for idx in tqdm(range(len(dataset)), desc="Patients"):
+        patient_data = dataset[idx]
+        pid = patient_data["patient_id"]
+
+        try:
+            gt_gtvp = (patient_data["mid_masks_gtvp"] > 0.5).squeeze(1).numpy()
+            gt_gtvn = (patient_data["mid_masks_gtvn"] > 0.5).squeeze(1).numpy()
+
+            pred_gtvp = (rng.random(gt_gtvp.shape) < density).astype(np.float32)
+            pred_gtvn = (rng.random(gt_gtvn.shape) < density).astype(np.float32)
+            pred_combined = ((pred_gtvp + pred_gtvn) > 0).astype(np.float32)
+
+            metrics = evaluate_patient(
+                pred_masks=pred_combined,
+                pred_gtvp=pred_gtvp,
+                pred_gtvn=pred_gtvn,
+                target_gtvp=gt_gtvp,
+                target_gtvn=gt_gtvn,
+            )
+            metrics["patient_id"] = pid
+            per_patient_metrics.append(metrics)
+
+        except Exception as e:
+            print(f"  Error on {pid}: {e}")
+
+    agg = aggregate_metrics(per_patient_metrics)
+
+    print(f"\nRandom Baseline Results ({split}):")
+    print(f"  aggDSC  : {agg.get('agg_dsc_mean', 0):.4f} +/- {agg.get('agg_dsc_std', 0):.4f}")
+    print(f"  GTVp DSC: {agg.get('dsc_gtvp_mean', 0):.4f}")
+    print(f"  GTVn DSC: {agg.get('dsc_gtvn_mean', 0):.4f}")
+
+    results = {
+        "aggregate": agg,
+        "per_patient": per_patient_metrics,
+        "config": {"density": density, "seed": seed},
+    }
+    with open(output_dir / "metrics.json", "w") as f:
+        json.dump(results, f, indent=2)
+
+    print(f"Results saved: {output_dir}/metrics.json")
+    return agg
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_dir", type=str, default="data/processed")
+    parser.add_argument("--output_dir", type=str, default="results/baselines/random")
+    parser.add_argument("--split", type=str, default="test")
+    parser.add_argument("--density", type=float, default=0.05)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--image_size", type=int, default=1024)
+    args = parser.parse_args()
+
+    run_random_baseline(
+        data_dir=args.data_dir,
+        output_dir=args.output_dir,
+        split=args.split,
+        density=args.density,
+        seed=args.seed,
+        image_size=args.image_size,
+    )

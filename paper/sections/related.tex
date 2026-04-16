@@ -1,0 +1,19 @@
+\section{Related Work}
+\label{sec:related}
+
+Medical longitudinal segmentation is dominated by full-training 3D
+specialists such as nnU-Net~\cite{isensee2021nnunet}, Swin
+UNETR~\cite{hatamizadeh2021swinunetr}, UNETR~\cite{hatamizadeh2022unetr},
+and MedNeXt~\cite{roy2023mednext}, typically ignoring the prior session.
+Foundation-model segmentors --- SAM~\cite{kirillov2023sam},
+SAM2~\cite{ravi2024sam2}, MedSAM2~\cite{ma2024medsam2},
+DINOv2~\cite{oquab2024dinov2}, CLIPSeg~\cite{lueddecke2022clipseg},
+TotalSegmentator~\cite{wasserthal2023totalsegmentator} --- offer strong
+priors but do not model cross-session structure. On the remote-sensing
+side, bitemporal change detectors (FC-Siam~\cite{daudt2018fcsiam},
+SNUNet~\cite{fang2022snunet}, BIT~\cite{chen2021bit},
+ChangeFormer~\cite{bandara2022changeformer},
+Bi-SRNet~\cite{ding2022bisrnet}, SCanNet~\cite{ding2024scannet})
+fuse via siamese concat / difference / transformer tokens on small
+encoders. CSM-SAM unifies these lines by plugging a cross-session
+attention module on top of a frozen SAM2 encoder.

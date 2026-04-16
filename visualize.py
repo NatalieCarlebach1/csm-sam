@@ -5,6 +5,7 @@ Generates publication-quality figures for N random test patients:
   1. Overlay figure: pre-RT | mid-RT GT | mid-RT prediction | change map | gate vals
   2. Slice gallery: multi-row grid through the 3D volume
   3. Change map figure: pre-RT | mid-RT | predicted change | GT change
+  4. Per-structure figure: GTVp pred vs GT and GTVn pred vs GT side by side
 
 Usage:
     python visualize.py --checkpoint checkpoints/best.pth --n_samples 10
@@ -21,6 +22,7 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")  # non-interactive backend for server environments
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -30,6 +32,9 @@ from csmsam.datasets import HNTSMRGDataset
 from csmsam.modeling import CSMSAM
 from csmsam.utils.metrics import evaluate_patient, compute_dice
 from csmsam.utils.visualization import (
+    COLORS,
+    overlay_mask,
+    tensor_to_display,
     visualize_patient,
     visualize_slice,
     make_slice_gallery,
@@ -44,12 +49,14 @@ def run_inference_for_patient(
     device: str,
     threshold: float = 0.5,
 ) -> dict:
-    """Run full 3D inference and return predictions dict."""
+    """Run full 3D inference and return predictions dict with per-structure outputs."""
     model.eval()
 
     pre_images = patient_data["pre_images"].to(device)
     mid_images = patient_data["mid_images"].to(device)
     pre_masks = patient_data["pre_masks"].to(device) if "pre_masks" in patient_data else None
+    pre_masks_gtvp = patient_data["pre_masks_gtvp"].to(device)
+    pre_masks_gtvn = patient_data["pre_masks_gtvn"].to(device)
     weeks = patient_data["weeks_elapsed"]
     weeks_t = torch.tensor([int(weeks)], dtype=torch.long, device=device)
 
@@ -69,39 +76,151 @@ def run_inference_for_patient(
             M_pre=M_pre,
             pre_images=pre_images[i].unsqueeze(0),
             weeks_elapsed=weeks_t,
+            pre_gtvp_mask=pre_masks_gtvp[i].unsqueeze(0),
+            pre_gtvn_mask=pre_masks_gtvn[i].unsqueeze(0),
             return_change_map=True,
+            detach_memory=True,
         )
-        pred_masks.append(out["masks"].squeeze(0).cpu())
+        pred_masks.append(out["masks"].squeeze(0).cpu())  # (2, H, W)
         if "change_map" in out and out["change_map"] is not None:
             change_maps.append(out["change_map"].squeeze(0).cpu())
         if "gate_vals" in out and out["gate_vals"] is not None:
             gate_vals.append(out["gate_vals"].squeeze(0).cpu())
 
-    pred_masks_t = torch.stack(pred_masks)  # (N, 1, H, W)
-    pred_binary = (torch.sigmoid(pred_masks_t) > threshold).squeeze(1).numpy()
+    pred_masks_t = torch.stack(pred_masks)                # (N, 2, H, W)
+    probs = torch.sigmoid(pred_masks_t)
+    pred_gtvp = (probs[:, 0] > threshold).numpy()         # (N, H, W)
+    pred_gtvn = (probs[:, 1] > threshold).numpy()         # (N, H, W)
+    pred_combined = (pred_gtvp | pred_gtvn)               # (N, H, W)
+
+    # Per-structure ground truth
+    gt_gtvp = (patient_data["mid_masks_gtvp"] > 0.5).squeeze(1).numpy()
+    gt_gtvn = (patient_data["mid_masks_gtvn"] > 0.5).squeeze(1).numpy()
+
+    dsc_gtvp = compute_dice(pred_gtvp, gt_gtvp)
+    dsc_gtvn = compute_dice(pred_gtvn, gt_gtvn)
+    agg_dsc = (dsc_gtvp + dsc_gtvn) / 2.0
 
     metrics = {
-        "agg_dsc": compute_dice(
-            pred_binary,
-            (patient_data["mid_masks"] > 0.5).squeeze(1).numpy(),
-        ),
-        "dsc_gtvp": compute_dice(
-            pred_binary,
-            (patient_data.get("mid_masks_gtvp", patient_data["mid_masks"]) > 0.5).squeeze(1).numpy(),
-        ),
-        "dsc_gtvn": compute_dice(
-            pred_binary,
-            (patient_data.get("mid_masks_gtvn", patient_data["mid_masks"]) > 0.5).squeeze(1).numpy(),
-        ),
+        "dsc_gtvp": dsc_gtvp,
+        "dsc_gtvn": dsc_gtvn,
+        "agg_dsc": agg_dsc,
     }
 
     return {
-        "masks": pred_masks_t,
-        "masks_binary": pred_binary,
+        "masks": pred_masks_t,                            # (N, 2, H, W) logits
+        "masks_gtvp": pred_gtvp,                          # (N, H, W) bool
+        "masks_gtvn": pred_gtvn,                          # (N, H, W) bool
+        "masks_binary": pred_combined,                    # (N, H, W) bool, combined
         "change_map": torch.stack(change_maps) if change_maps else None,
         "gate_vals": torch.stack(gate_vals) if gate_vals else None,
         "metrics": metrics,
     }
+
+
+def visualize_per_structure(
+    patient_data: dict,
+    predictions: dict,
+    output_path: Path,
+):
+    """
+    Side-by-side GTVp and GTVn pred vs GT figure for the best slice of each
+    structure (largest GT area). Saved to ``{patient_id}_per_structure.png``.
+
+    Layout:
+        Row 0 (GTVp): mid-RT+GT | mid-RT+pred | GT vs pred diff
+        Row 1 (GTVn): mid-RT+GT | mid-RT+pred | GT vs pred diff
+    """
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+    pid = patient_data.get("patient_id", "unknown")
+
+    mid_images = patient_data["mid_images"]                         # (N, 3, H, W)
+    gt_gtvp_vol = (patient_data["mid_masks_gtvp"] > 0.5).squeeze(1).numpy()
+    gt_gtvn_vol = (patient_data["mid_masks_gtvn"] > 0.5).squeeze(1).numpy()
+    pred_gtvp_vol = predictions["masks_gtvp"]
+    pred_gtvn_vol = predictions["masks_gtvn"]
+
+    def _best_slice(vol: np.ndarray) -> int:
+        sums = vol.reshape(vol.shape[0], -1).sum(axis=1)
+        return int(np.argmax(sums)) if sums.max() > 0 else vol.shape[0] // 2
+
+    idx_p = _best_slice(gt_gtvp_vol)
+    idx_n = _best_slice(gt_gtvn_vol)
+
+    fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+
+    structures = [
+        ("GTVp", idx_p, gt_gtvp_vol, pred_gtvp_vol, COLORS["gtvp"][:3]),
+        ("GTVn", idx_n, gt_gtvn_vol, pred_gtvn_vol, COLORS["gtvn"][:3]),
+    ]
+
+    for row, (name, idx, gt_vol, pred_vol, color) in enumerate(structures):
+        img = tensor_to_display(mid_images[idx])
+        gt = gt_vol[idx].astype(bool)
+        pr = pred_vol[idx].astype(bool)
+
+        # Col 0: GT overlay
+        axes[row, 0].imshow(overlay_mask(img, gt, color))
+        axes[row, 0].set_title(f"{name} GT (z={idx})", fontsize=10)
+        axes[row, 0].axis("off")
+
+        # Col 1: Prediction overlay
+        axes[row, 1].imshow(overlay_mask(img, pr, COLORS["pred"][:3]))
+        inter = (gt & pr).sum()
+        dsc = (2 * inter + 1e-6) / (gt.sum() + pr.sum() + 1e-6)
+        axes[row, 1].set_title(f"{name} Pred (slice DSC={dsc:.3f})", fontsize=10)
+        axes[row, 1].axis("off")
+
+        # Col 2: GT (red) vs pred (green) overlap (yellow)
+        combined = np.zeros((*img.shape[:2], 3))
+        combined[gt, 0] = 0.8
+        combined[pr, 1] = 0.8
+        combined[gt & pr] = [0.8, 0.8, 0.0]
+        axes[row, 2].imshow(img * 0.4 + combined * 0.6)
+        axes[row, 2].set_title(f"{name} GT vs Pred", fontsize=10)
+        axes[row, 2].axis("off")
+
+    legend_patches = [
+        mpatches.Patch(color=(0.8, 0.0, 0.0), label="GT only"),
+        mpatches.Patch(color=(0.0, 0.8, 0.0), label="Pred only"),
+        mpatches.Patch(color=(0.8, 0.8, 0.0), label="Overlap"),
+    ]
+    fig.legend(handles=legend_patches, loc="lower center", ncol=3, fontsize=9,
+               bbox_to_anchor=(0.5, -0.02))
+
+    m = predictions.get("metrics", {})
+    fig.suptitle(
+        f"{pid} — Per-Structure | "
+        f"GTVp DSC={m.get('dsc_gtvp', 0):.3f} | "
+        f"GTVn DSC={m.get('dsc_gtvn', 0):.3f} | "
+        f"aggDSC={m.get('agg_dsc', 0):.3f}",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    fig.savefig(output_path / f"{pid}_per_structure.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _visualize_all(patient_data, predictions, output_path, n_gallery_slices):
+    """Call shared visualizer + per-structure figure."""
+    # The shared helper expects a (N, 1, H, W) "masks" for gallery/overlay.
+    # Re-pack combined predictions into a logits-shaped tensor so existing
+    # helpers (which call sigmoid) still work, without mutating the original
+    # predictions dict.
+    combined_logits = predictions["masks"].max(dim=1, keepdim=True).values  # (N, 1, H, W)
+    legacy_predictions = {
+        **predictions,
+        "masks": combined_logits,
+    }
+    visualize_patient(
+        patient_data=patient_data,
+        predictions=legacy_predictions,
+        metrics=predictions["metrics"],
+        output_path=output_path,
+        n_gallery_slices=n_gallery_slices,
+    )
+    visualize_per_structure(patient_data, predictions, output_path)
 
 
 def plot_summary_histogram(all_metrics: list[dict], output_path: Path):
@@ -256,14 +375,9 @@ def main():
             all_metrics.append(metrics)
             all_results.append((idx, metrics))
 
-            visualize_patient(
-                patient_data=patient_data,
-                predictions=predictions,
-                metrics=metrics,
-                output_path=output_dir,
-                n_gallery_slices=args.gallery_slices,
-            )
-            print(f"  {pid}: aggDSC={metrics['agg_dsc']:.3f}")
+            _visualize_all(patient_data, predictions, output_dir, args.gallery_slices)
+            print(f"  {pid}: aggDSC={metrics['agg_dsc']:.3f} "
+                  f"(GTVp={metrics['dsc_gtvp']:.3f}, GTVn={metrics['dsc_gtvn']:.3f})")
 
         except Exception as e:
             print(f"  {pid}: ERROR — {e}")
@@ -277,7 +391,7 @@ def main():
         for idx in remaining:
             patient_data = dataset[idx]
             predictions = run_inference_for_patient(model, patient_data, device, args.threshold)
-            visualize_patient(patient_data, predictions, predictions["metrics"], output_dir / "worst")
+            _visualize_all(patient_data, predictions, output_dir / "worst", args.gallery_slices)
 
     if args.best_n > 0 and all_results:
         all_results_sorted = sorted(all_results, key=lambda x: x[1].get("agg_dsc", 0.0), reverse=True)
@@ -287,7 +401,7 @@ def main():
         for idx in remaining:
             patient_data = dataset[idx]
             predictions = run_inference_for_patient(model, patient_data, device, args.threshold)
-            visualize_patient(patient_data, predictions, predictions["metrics"], output_dir / "best")
+            _visualize_all(patient_data, predictions, output_dir / "best", args.gallery_slices)
 
     # Summary plots
     if all_metrics:
@@ -304,7 +418,7 @@ def main():
             print(f"  Min / Max   : {np.min(agg_vals):.4f} / {np.max(agg_vals):.4f}")
 
     print(f"\nAll figures saved to: {output_dir}")
-    print(f"Files per patient: {{patient_id}}_overlay.png, _gallery.png, _change_map.png")
+    print(f"Files per patient: {{patient_id}}_overlay.png, _gallery.png, _change_map.png, _per_structure.png")
 
 
 if __name__ == "__main__":

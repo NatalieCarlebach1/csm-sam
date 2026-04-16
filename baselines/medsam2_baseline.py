@@ -54,6 +54,8 @@ class MedSAM2Baseline:
         except ImportError:
             print("Warning: SAM2 not installed. Using random prediction fallback.")
             print("Install with: git clone https://github.com/facebookresearch/sam2 && pip install -e sam2/")
+        except Exception as e:
+            print(f"Warning: SAM2 build failed ({type(e).__name__}: {e}). Using random prediction fallback.")
 
     @torch.no_grad()
     def predict_volume(

@@ -5,14 +5,23 @@ Dataset structure (after preprocessing):
     data/processed/
         train/
             patient_001/
-                pre_image.nii.gz    — pre-RT T2-weighted MRI
-                pre_GTVp.nii.gz     — pre-RT primary tumor mask
-                pre_GTVn.nii.gz     — pre-RT nodal metastases mask
-                mid_image.nii.gz    — mid-RT T2-weighted MRI
-                mid_GTVp.nii.gz     — mid-RT primary tumor mask
-                mid_GTVn.nii.gz     — mid-RT nodal metastases mask
-                metadata.json       — weeks_elapsed, patient_id, etc.
+                pre_image.nii.gz           — pre-RT T2-weighted MRI
+                pre_GTVp.nii.gz            — pre-RT primary tumor mask
+                pre_GTVn.nii.gz            — pre-RT nodal metastases mask
+                mid_image.nii.gz           — mid-RT T2-weighted MRI
+                mid_GTVp.nii.gz            — mid-RT primary tumor mask
+                mid_GTVn.nii.gz            — mid-RT nodal metastases mask
+                pre_GTVp_registered.nii.gz — (optional) pre-RT GTVp warped to mid-RT grid
+                pre_GTVn_registered.nii.gz — (optional) pre-RT GTVn warped to mid-RT grid
+                metadata.json              — weeks_elapsed, patient_id, etc.
             ...
+
+    NOTE: HNTS-MRG 2024 SOTA (UW LAIR 0.733, mic-dkfz/"BAMF" 0.727, HiLab 0.725)
+    all consume ``preRT_mask_registered`` — the pre-RT mask warped onto the
+    mid-RT grid — as a primary input signal. The challenge organizers ship this
+    field. If ``pre_{GTVp,GTVn}_registered.nii.gz`` are present in a patient
+    dir, the loaders below expose them on the mid-RT image grid. See
+    ``data/preprocess.py`` (TODO there) for producing them locally.
         val/
             ...
         test/
@@ -25,12 +34,17 @@ HNTSMRGDataset:
 HNTSMRGSliceDataset:
     Returns individual 2D slice pairs extracted from volumes.
     Used for training (random access, augmentation-friendly).
+
+HNTSMRGSequenceDataset:
+    Returns K consecutive mid-RT slices plus matching pre-RT slices and
+    the full pre-RT volume (for memory encoding). Used for sequence training.
 """
 
 from __future__ import annotations
 
 import json
 import random
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -110,6 +124,72 @@ def to_mask_tensor(mask_2d: np.ndarray, size: int = SAM2_IMAGE_SIZE) -> torch.Te
     return t.squeeze(0)  # (1, size, size)
 
 
+class _VolumeCache:
+    """
+    LRU cache of normalized patient volumes.
+
+    Cache is per instance (i.e. per-dataset, which in a DataLoader means
+    per-worker because workers get their own copy of the dataset). Stores
+    fully-normalized numpy volumes keyed by patient directory path.
+    """
+
+    def __init__(self, maxsize: int = 8):
+        self.maxsize = maxsize
+        self._cache: "OrderedDict[str, dict]" = OrderedDict()
+
+    def get(self, patient_dir: Path) -> dict:
+        key = str(patient_dir)
+        if key in self._cache:
+            # Mark as recently used
+            self._cache.move_to_end(key)
+            return self._cache[key]
+
+        data = self._load(patient_dir)
+        self._cache[key] = data
+        if len(self._cache) > self.maxsize:
+            self._cache.popitem(last=False)  # evict LRU
+        return data
+
+    def _load(self, patient_dir: Path) -> dict:
+        """Load and normalize all volumes for a patient."""
+        pre_vol = normalize_mri(load_nifti(patient_dir / "pre_image.nii.gz"))
+        mid_vol = normalize_mri(load_nifti(patient_dir / "mid_image.nii.gz"))
+
+        def _load_mask(name: str, ref: np.ndarray) -> np.ndarray:
+            p = patient_dir / name
+            return load_nifti(p) if p.exists() else np.zeros_like(ref)
+
+        pre_gtvp = _load_mask("pre_GTVp.nii.gz", pre_vol)
+        pre_gtvn = _load_mask("pre_GTVn.nii.gz", pre_vol)
+        mid_gtvp = _load_mask("mid_GTVp.nii.gz", mid_vol)
+        mid_gtvn = _load_mask("mid_GTVn.nii.gz", mid_vol)
+
+        # Registered pre-RT masks on the mid-RT grid (HNTS-MRG SOTA input).
+        # Shape follows mid_vol. Zero when file is absent, so downstream code
+        # can always consume the tensor without branching.
+        pre_gtvp_reg = _load_mask("pre_GTVp_registered.nii.gz", mid_vol)
+        pre_gtvn_reg = _load_mask("pre_GTVn_registered.nii.gz", mid_vol)
+
+        meta_path = patient_dir / "metadata.json"
+        weeks_elapsed = 3
+        if meta_path.exists():
+            with open(meta_path) as f:
+                weeks_elapsed = json.load(f).get("weeks_elapsed", 3)
+
+        return {
+            "pre_vol": pre_vol,
+            "mid_vol": mid_vol,
+            "pre_gtvp": pre_gtvp,
+            "pre_gtvn": pre_gtvn,
+            "mid_gtvp": mid_gtvp,
+            "mid_gtvn": mid_gtvn,
+            "pre_gtvp_registered": pre_gtvp_reg,
+            "pre_gtvn_registered": pre_gtvn_reg,
+            "weeks_elapsed": weeks_elapsed,
+            "patient_id": patient_dir.name,
+        }
+
+
 class HNTSMRGDataset(Dataset):
     """
     Volume-level dataset for HNTS-MRG 2024.
@@ -128,6 +208,9 @@ class HNTSMRGDataset(Dataset):
         pre_masks_gtvn: (N_slices, 1, H, W) — GTVn only
         mid_masks_gtvp: (N_slices, 1, H, W)
         mid_masks_gtvn: (N_slices, 1, H, W)
+        pre_mask_registered:      (N_slices, 1, H, W) — pre-RT mask warped to mid-RT grid
+        pre_mask_registered_gtvp: (N_slices, 1, H, W)
+        pre_mask_registered_gtvn: (N_slices, 1, H, W)
     """
 
     def __init__(
@@ -136,6 +219,7 @@ class HNTSMRGDataset(Dataset):
         split: str = "train",
         image_size: int = SAM2_IMAGE_SIZE,
         min_mid_tumor_slices: int = 1,
+        volume_cache: Optional[_VolumeCache] = None,
     ):
         """
         Args:
@@ -143,10 +227,12 @@ class HNTSMRGDataset(Dataset):
             split      : "train", "val", or "test"
             image_size : SAM2 input resolution
             min_mid_tumor_slices: filter patients with fewer than N mid-RT tumor slices
+            volume_cache: optional shared volume cache
         """
         self.data_dir = Path(data_dir) / split
         self.image_size = image_size
         self.split = split
+        self.volume_cache = volume_cache
 
         self.patient_dirs = sorted([
             d for d in self.data_dir.iterdir()
@@ -165,21 +251,24 @@ class HNTSMRGDataset(Dataset):
         return len(self.patient_dirs)
 
     def _load_patient(self, patient_dir: Path) -> dict:
-        """Load all volumes for one patient."""
+        """Load all volumes for one patient (optionally via cache)."""
+        if self.volume_cache is not None:
+            return self.volume_cache.get(patient_dir)
+
         pre_vol = load_nifti(patient_dir / "pre_image.nii.gz")
         mid_vol = load_nifti(patient_dir / "mid_image.nii.gz")
 
-        # Load GTVp and GTVn masks separately and combined
         pre_gtvp = load_nifti(patient_dir / "pre_GTVp.nii.gz") if (patient_dir / "pre_GTVp.nii.gz").exists() else np.zeros_like(pre_vol)
         pre_gtvn = load_nifti(patient_dir / "pre_GTVn.nii.gz") if (patient_dir / "pre_GTVn.nii.gz").exists() else np.zeros_like(pre_vol)
         mid_gtvp = load_nifti(patient_dir / "mid_GTVp.nii.gz") if (patient_dir / "mid_GTVp.nii.gz").exists() else np.zeros_like(mid_vol)
         mid_gtvn = load_nifti(patient_dir / "mid_GTVn.nii.gz") if (patient_dir / "mid_GTVn.nii.gz").exists() else np.zeros_like(mid_vol)
+        # Registered pre-RT masks (on mid-RT grid). SOTA input.
+        pre_gtvp_reg = load_nifti(patient_dir / "pre_GTVp_registered.nii.gz") if (patient_dir / "pre_GTVp_registered.nii.gz").exists() else np.zeros_like(mid_vol)
+        pre_gtvn_reg = load_nifti(patient_dir / "pre_GTVn_registered.nii.gz") if (patient_dir / "pre_GTVn_registered.nii.gz").exists() else np.zeros_like(mid_vol)
 
-        # Normalize MRI
         pre_vol = normalize_mri(pre_vol)
         mid_vol = normalize_mri(mid_vol)
 
-        # Load metadata
         meta_path = patient_dir / "metadata.json"
         metadata = {}
         if meta_path.exists():
@@ -195,6 +284,8 @@ class HNTSMRGDataset(Dataset):
             "pre_gtvn": pre_gtvn,
             "mid_gtvp": mid_gtvp,
             "mid_gtvn": mid_gtvn,
+            "pre_gtvp_registered": pre_gtvp_reg,
+            "pre_gtvn_registered": pre_gtvn_reg,
             "weeks_elapsed": weeks_elapsed,
             "patient_id": patient_dir.name,
         }
@@ -214,6 +305,8 @@ class HNTSMRGDataset(Dataset):
         pre_gtvn = data["pre_gtvn"][:N]
         mid_gtvp = data["mid_gtvp"][:N]
         mid_gtvn = data["mid_gtvn"][:N]
+        pre_gtvp_reg = data["pre_gtvp_registered"][:N]
+        pre_gtvn_reg = data["pre_gtvn_registered"][:N]
 
         # Convert each slice to SAM2 tensor
         pre_images = torch.stack([to_rgb_tensor(pre_vol[i], self.image_size) for i in range(N)])
@@ -222,6 +315,8 @@ class HNTSMRGDataset(Dataset):
         pre_masks_gtvn = torch.stack([to_mask_tensor(pre_gtvn[i], self.image_size) for i in range(N)])
         mid_masks_gtvp = torch.stack([to_mask_tensor(mid_gtvp[i], self.image_size) for i in range(N)])
         mid_masks_gtvn = torch.stack([to_mask_tensor(mid_gtvn[i], self.image_size) for i in range(N)])
+        pre_mask_reg_gtvp = torch.stack([to_mask_tensor(pre_gtvp_reg[i], self.image_size) for i in range(N)])
+        pre_mask_reg_gtvn = torch.stack([to_mask_tensor(pre_gtvn_reg[i], self.image_size) for i in range(N)])
 
         return {
             "pre_images": pre_images,                              # (N, 3, H, W)
@@ -232,6 +327,14 @@ class HNTSMRGDataset(Dataset):
             "pre_masks_gtvn": pre_masks_gtvn,
             "mid_masks_gtvp": mid_masks_gtvp,
             "mid_masks_gtvn": mid_masks_gtvn,
+            # Pre-RT masks warped onto the mid-RT grid (HNTS-MRG SOTA input).
+            # All zero when *_registered.nii.gz files are absent — TODO:
+            # data/preprocess.py currently does not produce these files, so
+            # these tensors will be zero on the shipping data and must be
+            # filled in before attempting to reproduce UW-LAIR / BAMF numbers.
+            "pre_mask_registered": (pre_mask_reg_gtvp + pre_mask_reg_gtvn).clamp(0, 1),
+            "pre_mask_registered_gtvp": pre_mask_reg_gtvp,
+            "pre_mask_registered_gtvn": pre_mask_reg_gtvn,
             "weeks_elapsed": data["weeks_elapsed"],
             "patient_id": data["patient_id"],
         }
@@ -252,6 +355,9 @@ class HNTSMRGSliceDataset(Dataset):
         - Random rotation ±15°
         - Gaussian noise (σ ~ U[0, 0.02])
         - Intensity jitter (brightness ±10%)
+
+    Uses an LRU volume cache (per-dataloader-worker) to avoid reloading the
+    patient's NIfTI volumes on every __getitem__.
     """
 
     def __init__(
@@ -262,15 +368,20 @@ class HNTSMRGSliceDataset(Dataset):
         augment: bool = True,
         tumor_ratio: float = 0.7,
         cache_metadata: bool = True,
+        volume_cache_size: int = 8,
+        volume_cache: Optional[_VolumeCache] = None,
     ):
         """
         Args:
             tumor_ratio: fraction of returned slices that contain tumor
+            volume_cache_size: number of patient volumes to cache in memory
+            volume_cache: optional externally-provided cache (shared across datasets)
         """
         self.data_dir = Path(data_dir) / split
         self.image_size = image_size
         self.augment = augment and (split == "train")
         self.tumor_ratio = tumor_ratio
+        self.volume_cache = volume_cache if volume_cache is not None else _VolumeCache(maxsize=volume_cache_size)
 
         # Build index of all valid (patient, slice_idx) pairs
         self.tumor_slices: list[tuple[Path, int]] = []
@@ -319,14 +430,15 @@ class HNTSMRGSliceDataset(Dataset):
         return self._load_slice(patient_dir, slice_idx)
 
     def _load_slice(self, patient_dir: Path, slice_idx: int) -> dict:
-        """Load one pre/mid slice pair."""
-        # Load volumes
-        pre_vol = normalize_mri(load_nifti(patient_dir / "pre_image.nii.gz"))
-        mid_vol = normalize_mri(load_nifti(patient_dir / "mid_image.nii.gz"))
-        pre_gtvp = load_nifti(patient_dir / "pre_GTVp.nii.gz") if (patient_dir / "pre_GTVp.nii.gz").exists() else np.zeros_like(pre_vol)
-        pre_gtvn = load_nifti(patient_dir / "pre_GTVn.nii.gz") if (patient_dir / "pre_GTVn.nii.gz").exists() else np.zeros_like(pre_vol)
-        mid_gtvp = load_nifti(patient_dir / "mid_GTVp.nii.gz") if (patient_dir / "mid_GTVp.nii.gz").exists() else np.zeros_like(mid_vol)
-        mid_gtvn = load_nifti(patient_dir / "mid_GTVn.nii.gz") if (patient_dir / "mid_GTVn.nii.gz").exists() else np.zeros_like(mid_vol)
+        """Load one pre/mid slice pair (via volume cache)."""
+        data = self.volume_cache.get(patient_dir)
+
+        pre_vol = data["pre_vol"]
+        mid_vol = data["mid_vol"]
+        pre_gtvp_vol = data["pre_gtvp"]
+        pre_gtvn_vol = data["pre_gtvn"]
+        mid_gtvp_vol = data["mid_gtvp"]
+        mid_gtvn_vol = data["mid_gtvn"]
 
         # Clamp slice index to valid range
         N = min(pre_vol.shape[0], mid_vol.shape[0])
@@ -334,12 +446,12 @@ class HNTSMRGSliceDataset(Dataset):
 
         pre_slice = pre_vol[slice_idx]   # (H, W)
         mid_slice = mid_vol[slice_idx]
-        pre_mask = (pre_gtvp[slice_idx] + pre_gtvn[slice_idx]) > 0
-        mid_mask = (mid_gtvp[slice_idx] + mid_gtvn[slice_idx]) > 0
-        pre_gtvp_sl = pre_gtvp[slice_idx] > 0
-        pre_gtvn_sl = pre_gtvn[slice_idx] > 0
-        mid_gtvp_sl = mid_gtvp[slice_idx] > 0
-        mid_gtvn_sl = mid_gtvn[slice_idx] > 0
+        pre_mask = (pre_gtvp_vol[slice_idx] + pre_gtvn_vol[slice_idx]) > 0
+        mid_mask = (mid_gtvp_vol[slice_idx] + mid_gtvn_vol[slice_idx]) > 0
+        pre_gtvp_sl = pre_gtvp_vol[slice_idx] > 0
+        pre_gtvn_sl = pre_gtvn_vol[slice_idx] > 0
+        mid_gtvp_sl = mid_gtvp_vol[slice_idx] > 0
+        mid_gtvn_sl = mid_gtvn_vol[slice_idx] > 0
 
         # Augmentation
         if self.augment:
@@ -347,12 +459,7 @@ class HNTSMRGSliceDataset(Dataset):
                 pre_slice, mid_slice, pre_mask.astype(np.float32), mid_mask.astype(np.float32)
             )
 
-        # Load metadata
-        meta_path = patient_dir / "metadata.json"
-        weeks_elapsed = 3
-        if meta_path.exists():
-            with open(meta_path) as f:
-                weeks_elapsed = json.load(f).get("weeks_elapsed", 3)
+        weeks_elapsed = data.get("weeks_elapsed", 3)
 
         return {
             "pre_image": to_rgb_tensor(pre_slice.astype(np.float32), self.image_size),
@@ -405,24 +512,301 @@ class HNTSMRGSliceDataset(Dataset):
         return pre, mid, pre_mask, mid_mask
 
 
+class HNTSMRGSequenceDataset(Dataset):
+    """
+    Sequence-level dataset for training CSM-SAM with K consecutive slices.
+
+    Each __getitem__ returns a dict containing:
+        pre_images:        (N_pre, 3, H, W) — full pre-RT volume (for memory encoding)
+        pre_masks:         (N_pre, 1, H, W) — combined pre-RT mask for whole volume
+        mid_images:        (K, 3, H, W)     — K consecutive mid-RT slices
+        pre_images_seq:    (K, 3, H, W)     — same-index pre-RT slices (for change head)
+        pre_mask_gtvp:     (K, 1, H, W)
+        pre_mask_gtvn:     (K, 1, H, W)
+        mid_mask_gtvp:     (K, 1, H, W)
+        mid_mask_gtvn:     (K, 1, H, W)
+        weeks_elapsed:     int
+        patient_id:        str
+        start_slice:       int
+
+    Sampling: with probability `tumor_window_ratio`, the K-slice window is
+    drawn uniformly from windows that contain at least one tumor pixel in
+    the mid-RT mask; otherwise uniformly across all valid starts.
+    Augmentations (flip / noise / brightness) are applied consistently to
+    every slice in the sampled window.
+    """
+
+    def __init__(
+        self,
+        data_dir: str | Path,
+        split: str = "train",
+        image_size: int = SAM2_IMAGE_SIZE,
+        augment: bool = True,
+        sequence_length: int = 4,
+        tumor_window_ratio: float = 0.8,
+        volume_cache_size: int = 8,
+        volume_cache: Optional[_VolumeCache] = None,
+    ):
+        self.data_dir = Path(data_dir) / split
+        self.image_size = image_size
+        self.augment = augment and (split == "train")
+        self.sequence_length = int(sequence_length)
+        self.tumor_window_ratio = float(tumor_window_ratio)
+        self.volume_cache = volume_cache if volume_cache is not None else _VolumeCache(maxsize=volume_cache_size)
+
+        self.patient_dirs = sorted([
+            d for d in self.data_dir.iterdir()
+            if d.is_dir() and (d / "mid_image.nii.gz").exists()
+        ])
+        if not self.patient_dirs:
+            raise FileNotFoundError(
+                f"No patient directories found in {self.data_dir}. "
+                "Run data/preprocess.py first."
+            )
+
+        # Pre-compute, per patient, the list of valid K-windows and the subset
+        # of windows that contain tumor. This scan only reads the mid masks
+        # (small) — the expensive volume load stays in the cache on first use.
+        self.patient_meta: list[dict] = []
+        K = self.sequence_length
+        print(
+            f"[HNTSMRGSequenceDataset] Indexing {len(self.patient_dirs)} {split} "
+            f"patients (K={K})..."
+        )
+        for pdir in self.patient_dirs:
+            try:
+                mid_gtvp = load_nifti(pdir / "mid_GTVp.nii.gz") if (pdir / "mid_GTVp.nii.gz").exists() else None
+                mid_gtvn = load_nifti(pdir / "mid_GTVn.nii.gz") if (pdir / "mid_GTVn.nii.gz").exists() else None
+                if mid_gtvp is None and mid_gtvn is None:
+                    continue
+                ref = mid_gtvp if mid_gtvp is not None else mid_gtvn
+                if mid_gtvp is None:
+                    mid_gtvp = np.zeros_like(ref)
+                if mid_gtvn is None:
+                    mid_gtvn = np.zeros_like(ref)
+                tumor_per_slice = ((mid_gtvp + mid_gtvn) > 0).reshape(
+                    mid_gtvp.shape[0], -1
+                ).any(axis=1)  # (D,)
+                D = int(tumor_per_slice.shape[0])
+                if D < K:
+                    continue
+                max_start = D - K
+                valid_starts = list(range(0, max_start + 1))
+                tumor_starts = [
+                    s for s in valid_starts if tumor_per_slice[s:s + K].any()
+                ]
+                self.patient_meta.append({
+                    "dir": pdir,
+                    "n_slices": D,
+                    "valid_starts": valid_starts,
+                    "tumor_starts": tumor_starts,
+                })
+            except Exception as e:
+                print(f"  Warning: skipping {pdir.name}: {e}")
+
+        n_tumor_windows = sum(len(m["tumor_starts"]) for m in self.patient_meta)
+        n_windows = sum(len(m["valid_starts"]) for m in self.patient_meta)
+        print(
+            f"  {len(self.patient_meta)} patients, {n_tumor_windows} tumor windows "
+            f"/ {n_windows} total windows"
+        )
+
+    def __len__(self) -> int:
+        # One sequence per patient per epoch; shuffling re-samples windows each epoch.
+        return len(self.patient_meta)
+
+    def _pick_start(self, meta: dict) -> int:
+        tumor_starts = meta["tumor_starts"]
+        valid_starts = meta["valid_starts"]
+        if tumor_starts and random.random() < self.tumor_window_ratio:
+            return random.choice(tumor_starts)
+        return random.choice(valid_starts)
+
+    def __getitem__(self, idx: int) -> dict:
+        meta = self.patient_meta[idx]
+        patient_dir: Path = meta["dir"]
+        data = self.volume_cache.get(patient_dir)
+
+        pre_vol = data["pre_vol"]
+        mid_vol = data["mid_vol"]
+        pre_gtvp_vol = data["pre_gtvp"]
+        pre_gtvn_vol = data["pre_gtvn"]
+        mid_gtvp_vol = data["mid_gtvp"]
+        mid_gtvn_vol = data["mid_gtvn"]
+
+        D_pre = int(pre_vol.shape[0])
+        D_mid = int(mid_vol.shape[0])
+        K = self.sequence_length
+
+        # Mid-RT window
+        start = self._pick_start(meta)
+        start = min(max(0, start), max(0, D_mid - K))
+        end = start + K
+
+        mid_slices = mid_vol[start:end]
+        mid_gtvp_sl = mid_gtvp_vol[start:end]
+        mid_gtvn_sl = mid_gtvn_vol[start:end]
+
+        # Pre-RT: use the SAME slice indices for the aligned per-slice signal
+        # (change head). Clamp to pre volume length if shorter.
+        pre_start = min(start, max(0, D_pre - K))
+        pre_end = pre_start + K
+        pre_seq_slices = pre_vol[pre_start:pre_end]
+        pre_seq_gtvp = pre_gtvp_vol[pre_start:pre_end]
+        pre_seq_gtvn = pre_gtvn_vol[pre_start:pre_end]
+
+        # Consistent augmentation decisions across the whole window
+        aug_decisions = self._decide_augmentations()
+
+        # Build mid-seq tensors
+        mid_images_list = []
+        mid_mask_gtvp_list = []
+        mid_mask_gtvn_list = []
+        for k in range(K):
+            im = mid_slices[k].astype(np.float32)
+            gp = (mid_gtvp_sl[k] > 0).astype(np.float32)
+            gn = (mid_gtvn_sl[k] > 0).astype(np.float32)
+            if self.augment:
+                im, gp, gn = self._apply_augmentations(im, [gp, gn], aug_decisions)
+            mid_images_list.append(to_rgb_tensor(im, self.image_size))
+            mid_mask_gtvp_list.append(to_mask_tensor(gp, self.image_size))
+            mid_mask_gtvn_list.append(to_mask_tensor(gn, self.image_size))
+        mid_images = torch.stack(mid_images_list)
+        mid_mask_gtvp = torch.stack(mid_mask_gtvp_list)
+        mid_mask_gtvn = torch.stack(mid_mask_gtvn_list)
+
+        # Build per-slice pre-RT sequence tensors (same aug decisions)
+        pre_seq_images_list = []
+        pre_seq_mask_gtvp_list = []
+        pre_seq_mask_gtvn_list = []
+        for k in range(K):
+            im = pre_seq_slices[k].astype(np.float32)
+            gp = (pre_seq_gtvp[k] > 0).astype(np.float32)
+            gn = (pre_seq_gtvn[k] > 0).astype(np.float32)
+            if self.augment:
+                im, gp, gn = self._apply_augmentations(im, [gp, gn], aug_decisions)
+            pre_seq_images_list.append(to_rgb_tensor(im, self.image_size))
+            pre_seq_mask_gtvp_list.append(to_mask_tensor(gp, self.image_size))
+            pre_seq_mask_gtvn_list.append(to_mask_tensor(gn, self.image_size))
+        pre_images_seq = torch.stack(pre_seq_images_list)
+        pre_mask_gtvp = torch.stack(pre_seq_mask_gtvp_list)
+        pre_mask_gtvn = torch.stack(pre_seq_mask_gtvn_list)
+
+        # Full pre-RT volume for memory encoding (applies only flips from aug
+        # decisions — noise/brightness aren't geometry and we keep the pre
+        # memory stream consistent-but-not-noisy).
+        full_pre_images_list = []
+        full_pre_masks_list = []
+        for k in range(D_pre):
+            im = pre_vol[k].astype(np.float32)
+            m = ((pre_gtvp_vol[k] + pre_gtvn_vol[k]) > 0).astype(np.float32)
+            if self.augment:
+                im, m = self._apply_geometry_only(im, m, aug_decisions)
+            full_pre_images_list.append(to_rgb_tensor(im, self.image_size))
+            full_pre_masks_list.append(to_mask_tensor(m, self.image_size))
+        pre_images = torch.stack(full_pre_images_list)
+        pre_masks = torch.stack(full_pre_masks_list)
+
+        return {
+            "pre_images": pre_images,               # (N_pre, 3, H, W)
+            "pre_masks": pre_masks,                 # (N_pre, 1, H, W)
+            "mid_images": mid_images,               # (K, 3, H, W)
+            "pre_images_seq": pre_images_seq,       # (K, 3, H, W)
+            "pre_mask_gtvp": pre_mask_gtvp,         # (K, 1, H, W)
+            "pre_mask_gtvn": pre_mask_gtvn,         # (K, 1, H, W)
+            "mid_mask_gtvp": mid_mask_gtvp,         # (K, 1, H, W)
+            "mid_mask_gtvn": mid_mask_gtvn,         # (K, 1, H, W)
+            "weeks_elapsed": int(data.get("weeks_elapsed", 3)),
+            "patient_id": patient_dir.name,
+            "start_slice": int(start),
+        }
+
+    # --- Augmentation helpers -------------------------------------------------
+
+    def _decide_augmentations(self) -> dict:
+        """Sample a single set of augmentation decisions for one K-window."""
+        return {
+            "hflip": random.random() < 0.5,
+            "vflip": random.random() < 0.3,
+            "noise_sigma": random.uniform(0, 0.02) if random.random() < 0.5 else 0.0,
+            "brightness": random.uniform(-0.1, 0.1) if random.random() < 0.4 else 0.0,
+        }
+
+    def _apply_augmentations(
+        self,
+        image: np.ndarray,
+        masks: list[np.ndarray],
+        d: dict,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Apply the sampled augmentations to one image + two masks."""
+        if d["hflip"]:
+            image = np.fliplr(image).copy()
+            masks = [np.fliplr(m).copy() for m in masks]
+        if d["vflip"]:
+            image = np.flipud(image).copy()
+            masks = [np.flipud(m).copy() for m in masks]
+        if d["noise_sigma"] > 0:
+            image = (image + np.random.normal(0, d["noise_sigma"], image.shape)).clip(0, 1)
+        if d["brightness"] != 0.0:
+            image = (image + d["brightness"]).clip(0, 1)
+        image = image.astype(np.float32, copy=False)
+        return image, masks[0], masks[1]
+
+    def _apply_geometry_only(
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+        d: dict,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Apply only geometric aug (flips) — used for full pre-RT volume."""
+        if d["hflip"]:
+            image = np.fliplr(image).copy()
+            mask = np.fliplr(mask).copy()
+        if d["vflip"]:
+            image = np.flipud(image).copy()
+            mask = np.flipud(mask).copy()
+        return image, mask
+
+
 def build_dataloaders(
     data_dir: str | Path,
     batch_size: int = 4,
     num_workers: int = 4,
     image_size: int = SAM2_IMAGE_SIZE,
     pin_memory: bool = True,
+    sequence_length: int = 0,
+    tumor_window_ratio: float = 0.8,
 ) -> dict[str, DataLoader]:
     """
-    Build train (slice-level) and val/test (volume-level) DataLoaders.
+    Build train (slice- or sequence-level) and val/test (volume-level) DataLoaders.
+
+    Args:
+        sequence_length: if > 1, use HNTSMRGSequenceDataset for training; else
+                         fall back to the slice-level dataset.
+        tumor_window_ratio: ratio of training windows biased to contain tumor
+                            (only used when sequence_length > 1).
 
     Returns:
         {
-            "train": DataLoader[HNTSMRGSliceDataset],
+            "train": DataLoader[HNTSMRGSliceDataset | HNTSMRGSequenceDataset],
             "val":   DataLoader[HNTSMRGDataset],
             "test":  DataLoader[HNTSMRGDataset],
         }
     """
-    train_ds = HNTSMRGSliceDataset(data_dir, split="train", image_size=image_size, augment=True)
+    if sequence_length and sequence_length > 1:
+        train_ds: Dataset = HNTSMRGSequenceDataset(
+            data_dir,
+            split="train",
+            image_size=image_size,
+            augment=True,
+            sequence_length=sequence_length,
+            tumor_window_ratio=tumor_window_ratio,
+        )
+    else:
+        train_ds = HNTSMRGSliceDataset(
+            data_dir, split="train", image_size=image_size, augment=True
+        )
+
     val_ds = HNTSMRGDataset(data_dir, split="val", image_size=image_size)
     test_ds = HNTSMRGDataset(data_dir, split="test", image_size=image_size)
 

@@ -1,0 +1,12 @@
+\section{Introduction}
+\label{sec:intro}
+
+Adaptive radiotherapy, longitudinal disease monitoring, and remote-sensing
+change detection all share a structural prior: a prior-session observation
+of the same scene or patient is available at inference time. Existing
+segmentation pipelines either discard this prior, concatenate it as an
+input channel, or fuse it with shallow siamese features. We argue that a
+more direct approach is to treat the prior session as a \emph{memory bank}
+of tokens attended to by a frozen foundation backbone. CSM-SAM instantiates
+this idea on top of SAM2~\cite{ravi2024sam2} and evaluates it on
+medical longitudinal and remote-sensing bitemporal benchmarks.

@@ -157,7 +157,10 @@ def aggregate_metrics(per_patient_metrics: list[dict]) -> dict[str, float]:
     aggregated = {}
 
     for key in keys:
-        values = [m[key] for m in per_patient_metrics if not np.isinf(m[key]) and not np.isnan(m[key])]
+        raw = [m[key] for m in per_patient_metrics]
+        if not all(isinstance(v, (int, float, np.floating, np.integer)) for v in raw):
+            continue
+        values = [v for v in raw if not np.isinf(v) and not np.isnan(v)]
         if values:
             aggregated[f"{key}_mean"] = float(np.mean(values))
             aggregated[f"{key}_std"] = float(np.std(values))

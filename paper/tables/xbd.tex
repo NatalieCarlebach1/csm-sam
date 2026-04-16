@@ -1,0 +1,18 @@
+\begin{table}[t]
+\centering
+\caption{xBD / xView2 building damage change detection. Official xView2
+score is $0.3 \cdot F1_{\mathrm{loc}} + 0.7 \cdot F1_{\mathrm{dmg}}$.
+Dual-HRNet reference numbers are from the xView2 challenge leaderboard.}
+\label{tab:xbd}
+\small
+\begin{tabular}{lcccc}
+\toprule
+Method & xView2 score $\uparrow$ & $F1_{\mathrm{loc}}$ $\uparrow$ & $F1_{\mathrm{dmg}}$ $\uparrow$ & \#params (tr.) \\
+\midrule
+xView2 baseline~\cite{gupta2019xbd}               & 0.26      & 0.80 & 0.03 & -- \\
+Dual-HRNet~\cite{gupta2019xbd}                    & 0.80--0.83 & 0.86 & 0.77 & -- \\
+\midrule
+\textbf{CSM-SAM (Ours)}                           & TBD-$\pm$-- & TBD-$\pm$-- & TBD-$\pm$-- & 2M \\ % filled in after training
+\bottomrule
+\end{tabular}
+\end{table}

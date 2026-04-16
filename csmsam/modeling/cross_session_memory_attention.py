@@ -6,7 +6,7 @@ Given:
   - curr_features : features of current mid-RT slice (B, HW, C)
   - M_pre         : pre-RT memory bank (B, N_pre, C)  — encoded from week-0 scan
   - M_mid         : within-session mid-RT memory (B, N_mid, C) — prior slices of same scan
-  - weeks_elapsed : integer tensor (B,) — weeks between pre-RT and mid-RT scans
+  - weeks_elapsed : integer or float tensor (B,) — weeks between pre-RT and mid-RT scans
 
 The module learns to gate between:
   (1) Cross-session context  — what the pre-RT scan tells us about tumor location
@@ -25,8 +25,13 @@ import torch.nn.functional as F
 from einops import rearrange
 
 
-class TemporalEmbedding(nn.Module):
-    """Additive embedding conditioned on weeks elapsed (0–12 weeks supported)."""
+class DiscreteTemporalEmbedding(nn.Module):
+    """Additive embedding conditioned on weeks elapsed (0–max_weeks supported).
+
+    This is the ABLATION baseline: a discrete ``nn.Embedding`` lookup over
+    integer weeks. It is kept alongside :class:`ContinuousTimeEncoder` so the
+    two variants can be compared head-to-head in experiments.
+    """
 
     def __init__(self, d_model: int, max_weeks: int = 12):
         super().__init__()
@@ -41,6 +46,82 @@ class TemporalEmbedding(nn.Module):
             (B, 1, d_model) temporal bias added to memory tokens
         """
         return self.embedding(weeks).unsqueeze(1)  # (B, 1, C)
+
+
+class ContinuousTimeEncoder(nn.Module):
+    """Continuous-time temporal encoder.
+
+    Accepts a scalar float tensor of weeks elapsed (need not be integer) and
+    produces an additive bias for memory tokens. Uses sinusoidal features at
+    ``n_frequencies`` log-spaced (base 2) frequencies, followed by a small MLP.
+
+    Initialization is intentionally small (std=0.02 on the final projection
+    with zero bias) so that the encoder's contribution is near-zero at init
+    and training starts from a neutral point.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        hidden_dim: int = 128,
+        n_frequencies: int = 6,
+        normalize_by: float = 12.0,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.n_frequencies = n_frequencies
+        self.normalize_by = float(normalize_by) if normalize_by else 1.0
+
+        in_features = 2 * n_frequencies
+        self.mlp = nn.Sequential(
+            nn.Linear(in_features, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, d_model),
+        )
+
+        # Small init on the final projection so the bias is near-zero at start.
+        final_linear = self.mlp[-1]
+        nn.init.normal_(final_linear.weight, std=0.02)
+        if final_linear.bias is not None:
+            nn.init.zeros_(final_linear.bias)
+
+    def forward(self, weeks: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            weeks: (B,) float tensor of weeks elapsed (need not be integer)
+        Returns:
+            (B, 1, d_model) temporal bias added to memory tokens
+        """
+        t = weeks.to(dtype=torch.float32)
+        if self.normalize_by and self.normalize_by != 1.0:
+            t = t / self.normalize_by
+
+        freqs = 2.0 ** torch.arange(
+            self.n_frequencies, device=t.device, dtype=torch.float32
+        )  # (n_freq,)
+        ang = t.unsqueeze(-1) * freqs.unsqueeze(0)  # (B, n_freq)
+        features = torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1)  # (B, 2*n_freq)
+
+        out = self.mlp(features)  # (B, d_model)
+        return out.unsqueeze(1)  # (B, 1, d_model)
+
+
+def build_temporal_encoder(
+    kind: str,
+    d_model: int,
+    max_weeks: int = 12,
+    hidden_dim: int = 128,
+    n_frequencies: int = 6,
+) -> nn.Module:
+    """Dispatch to the requested temporal encoder variant."""
+    if kind == "continuous":
+        return ContinuousTimeEncoder(
+            d_model, hidden_dim=hidden_dim, n_frequencies=n_frequencies
+        )
+    elif kind == "discrete":
+        return DiscreteTemporalEmbedding(d_model, max_weeks=max_weeks)
+    else:
+        raise ValueError(f"Unknown temporal encoder: {kind}")
 
 
 class MultiHeadCrossAttention(nn.Module):
@@ -131,6 +212,9 @@ class CrossSessionMemoryAttention(nn.Module):
         dropout: float = 0.0,
         max_weeks: int = 12,
         norm_eps: float = 1e-6,
+        temporal_encoder_type: str = "continuous",
+        temporal_hidden_dim: int = 128,
+        temporal_n_frequencies: int = 6,
     ):
         super().__init__()
 
@@ -140,8 +224,14 @@ class CrossSessionMemoryAttention(nn.Module):
         # Within-session attention (mid-RT prior slices → current features)
         self.within_session_attn = MultiHeadCrossAttention(d_model, num_heads, dropout)
 
-        # Temporal embedding for weeks elapsed
-        self.temporal_embed = TemporalEmbedding(d_model, max_weeks)
+        # Temporal encoder for weeks elapsed (continuous by default; discrete ablation available)
+        self.temporal_embed = build_temporal_encoder(
+            temporal_encoder_type,
+            d_model,
+            max_weeks=max_weeks,
+            hidden_dim=temporal_hidden_dim,
+            n_frequencies=temporal_n_frequencies,
+        )
 
         # Gate: learned linear combination of cross- and within-session contexts
         # Input: concat of cross-session context + within-session context
@@ -173,6 +263,21 @@ class CrossSessionMemoryAttention(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
+        # Re-apply the small init on the continuous-time encoder's final
+        # projection so the temporal bias stays near-zero at start (the
+        # sweeping _init_weights above would otherwise overwrite it).
+        if isinstance(self.temporal_embed, ContinuousTimeEncoder):
+            final_linear = self.temporal_embed.mlp[-1]
+            nn.init.normal_(final_linear.weight, std=0.02)
+            if final_linear.bias is not None:
+                nn.init.zeros_(final_linear.bias)
+
+    def _prepare_weeks(self, weeks: torch.Tensor) -> torch.Tensor:
+        """Cast ``weeks`` to the dtype expected by the active temporal encoder."""
+        if isinstance(self.temporal_embed, ContinuousTimeEncoder):
+            return weeks.float()
+        return weeks.long()
+
     def forward(
         self,
         curr_features: torch.Tensor,
@@ -188,7 +293,8 @@ class CrossSessionMemoryAttention(nn.Module):
             M_pre         : (B, N_pre, C) — pre-RT memory bank (from pre-RT forward pass)
             M_mid         : (B, N_mid, C) or None — within-session mid-RT memory
                             (None at the first mid-RT slice, gradually grows)
-            weeks_elapsed : (B,) long tensor — integer weeks between pre-RT and mid-RT
+            weeks_elapsed : (B,) tensor — weeks between pre-RT and mid-RT.
+                            Cast internally to long (discrete) or float (continuous).
             M_pre_mask    : (B, N_pre) bool — optional padding mask for pre memory
             M_mid_mask    : (B, N_mid) bool — optional padding mask for mid memory
 
@@ -204,7 +310,8 @@ class CrossSessionMemoryAttention(nn.Module):
         # ------------------------------------------------------------------
         # Add temporal embedding to pre-RT memory to inform the model about
         # how many weeks have elapsed (tumor shrinkage scales with time)
-        temp_bias = self.temporal_embed(weeks_elapsed)  # (B, 1, C)
+        weeks_typed = self._prepare_weeks(weeks_elapsed)
+        temp_bias = self.temporal_embed(weeks_typed)  # (B, 1, C)
         M_pre_temp = M_pre + temp_bias  # (B, N_pre, C)
 
         cross_context, cross_attn_w = self.cross_session_attn(
@@ -328,3 +435,20 @@ class CrossSessionMemoryEncoder(nn.Module):
         # Reshape to (B, N*P², C)
         M_pre = feat.reshape(B, N * P * P, C)
         return M_pre
+
+
+# Back-compat alias: older code imports ``TemporalEmbedding`` directly.
+TemporalEmbedding = DiscreteTemporalEmbedding
+
+
+if __name__ == "__main__":
+    # Smoke test for both temporal encoders.
+    d = 256
+    t = torch.tensor([0.0, 3.5, 7.0])
+    cont = ContinuousTimeEncoder(d)
+    disc = DiscreteTemporalEmbedding(d)
+    out_c = cont(t)
+    out_d = disc(t.long())
+    assert out_c.shape == (3, 1, d), out_c.shape
+    assert out_d.shape == (3, 1, d), out_d.shape
+    print("OK", out_c.shape, out_d.shape)

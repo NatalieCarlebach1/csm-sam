@@ -1,0 +1,15 @@
+\section{Method}
+\label{sec:method}
+
+CSM-SAM keeps the SAM2 image encoder and mask decoder
+frozen and introduces two trainable components totalling roughly 2M
+parameters. The core module, \texttt{CrossSessionMemoryAttention}
+(see \texttt{csmsam/modeling/cross\_session\_memory\_attention.py}),
+encodes the pre-session image and mask into a memory bank of tokens and
+lets the mid-session query tokens attend to this bank through a standard
+multi-head cross-attention block, conditioned on a continuous
+weeks-elapsed embedding. A lightweight change head~\cite{fang2022snunet}
+supervised by the pre/mid mask XOR provides an auxiliary gradient that
+aligns the attention with regions of temporal change. The total loss is
+\(\mathcal{L} = \mathcal{L}_{\text{Dice}} + \mathcal{L}_{\text{CE}} +
+0.3\,\mathcal{L}_{\text{change}}\).

@@ -10,6 +10,17 @@ Steps:
   6. Split into train/val/test (80/10/10 or use provided splits)
   7. Save as .nii.gz with metadata.json per patient
 
+TODO: emit ``pre_GTVp_registered.nii.gz`` / ``pre_GTVn_registered.nii.gz``
+(pre-RT masks warped to the mid-RT image grid). All HNTS-MRG 2024 top-5
+teams (UW LAIR 0.733, mic-dkfz 0.727, HiLab 0.725, ...) use this signal as
+an input channel or mask-aware attention prior; without it we cannot
+reproduce their numbers. The current pipeline registers mid-RT to pre-RT
+(wrong direction for this use) — we need an extra pass that inverts the
+transform (or re-registers pre→mid with a deformable transform) and
+resamples pre-RT GTVp/GTVn with nearest-neighbour interpolation onto the
+mid-RT reference grid. See ``csmsam/datasets/hnts_mrg.py`` for the
+consumer contract (keys ``pre_mask_registered`` / ``*_gtvp`` / ``*_gtvn``).
+
 Usage:
     python data/preprocess.py \
         --input_dir data/raw \
