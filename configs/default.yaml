@@ -1,0 +1,69 @@
+# CSM-SAM Default Training Configuration
+# Edit paths and hyperparameters before training.
+
+# ─── Data ────────────────────────────────────────────────────────────────────
+data:
+  data_dir: "data/processed"           # preprocessed dataset directory
+  image_size: 1024                     # SAM2 input resolution (1024×1024)
+  batch_size: 4                        # training batch size (reduce if OOM)
+  num_workers: 4                       # dataloader workers
+  pin_memory: true
+  tumor_ratio: 0.7                     # fraction of training slices with tumor
+
+# ─── Model ───────────────────────────────────────────────────────────────────
+model:
+  sam2_checkpoint: "checkpoints/sam2/sam2.1_hiera_large.pt"
+  sam2_cfg: "sam2_hiera_large"         # SAM2 model config name
+  d_model: 256                         # feature dimension (matches SAM2-L)
+  num_heads: 8                         # attention heads
+  n_memory_frames: 8                   # pre-RT slices encoded into memory
+  spatial_pool_size: 16                # spatial pool for memory encoding
+  max_weeks: 12                        # max weeks for temporal embedding
+  dropout: 0.0                         # attention dropout
+
+# ─── Training ────────────────────────────────────────────────────────────────
+training:
+  epochs: 200
+  lr: 1e-4                            # learning rate for novel modules
+  lr_decoder: 1e-5                    # learning rate for SAM2 decoder head
+  weight_decay: 0.01
+  warmup_epochs: 10
+  scheduler: "cosine"                 # "cosine" | "step" | "plateau"
+  gradient_clip_norm: 1.0
+  amp: true                           # automatic mixed precision
+  accumulate_grad_batches: 4          # effective batch size = batch_size * accumulate
+
+# ─── Loss ────────────────────────────────────────────────────────────────────
+loss:
+  lambda_dice: 1.0
+  lambda_bce: 1.0
+  lambda_change: 0.3                  # change map auxiliary loss weight
+  change_class_weights: [0.1, 1.0, 2.0, 2.0]  # [background, stable, grown, shrunk]
+
+# ─── Evaluation ──────────────────────────────────────────────────────────────
+evaluation:
+  val_every_n_epochs: 5               # validate every N epochs
+  primary_metric: "agg_dsc"          # metric used for best model selection
+  threshold: 0.5                      # sigmoid threshold for binary prediction
+  voxel_spacing: [3.0, 1.0, 1.0]     # mm, for HD95
+
+# ─── Checkpointing ───────────────────────────────────────────────────────────
+checkpoint:
+  output_dir: "checkpoints/csmsam_default"
+  save_every_n_epochs: 10
+  keep_last_n: 3                      # number of recent checkpoints to keep
+  save_best: true                     # always save the best model
+
+# ─── Logging ─────────────────────────────────────────────────────────────────
+logging:
+  use_wandb: false                    # set true and configure project below
+  wandb_project: "csm-sam"
+  wandb_entity: null                  # your wandb username
+  log_every_n_steps: 20
+  log_images_every_n_epochs: 20       # log sample predictions to wandb
+
+# ─── Hardware ────────────────────────────────────────────────────────────────
+hardware:
+  device: "cuda"                      # "cuda" | "cpu"
+  num_gpus: 1
+  seed: 42

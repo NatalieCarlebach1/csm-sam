@@ -1,0 +1,38 @@
+# Baseline configurations
+
+# ─── MedSAM2 Baseline ────────────────────────────────────────────────────────
+# Within-session only (no cross-session memory)
+medsam2:
+  sam2_checkpoint: "checkpoints/sam2/sam2.1_hiera_large.pt"
+  sam2_cfg: "sam2_hiera_large"
+  batch_size: 4
+  image_size: 1024
+
+# ─── nnUNet Baseline ─────────────────────────────────────────────────────────
+# Standard nnUNet fine-tuned on HNTS-MRG
+# Reference: HNTS-MRG 2024 challenge winner used nnUNet variant
+nnunet:
+  nnunet_task_id: "Task001_HNTSMRG"
+  fold: 0
+  trainer: "nnUNetTrainerV2"
+  plans: "nnUNetPlansv2.1"
+  model: "3d_fullres"
+
+# ─── Dual-Stream Ablation ────────────────────────────────────────────────────
+# CSM-SAM without cross-session memory (within-session only)
+csmsam_ablation_no_cross_session:
+  same_as: default.yaml
+  overrides:
+    model.disable_cross_session: true
+
+# ─── Ablation: No Change Map Loss ────────────────────────────────────────────
+csmsam_ablation_no_change_map:
+  same_as: default.yaml
+  overrides:
+    loss.lambda_change: 0.0
+
+# ─── Ablation: No Temporal Embedding ─────────────────────────────────────────
+csmsam_ablation_no_temporal:
+  same_as: default.yaml
+  overrides:
+    model.disable_temporal_embed: true
