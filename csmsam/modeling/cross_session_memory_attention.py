@@ -286,6 +286,7 @@ class CrossSessionMemoryAttention(nn.Module):
         weeks_elapsed: torch.Tensor,
         M_pre_mask: torch.Tensor | None = None,
         M_mid_mask: torch.Tensor | None = None,
+        z_film: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -297,6 +298,10 @@ class CrossSessionMemoryAttention(nn.Module):
                             Cast internally to long (discrete) or float (continuous).
             M_pre_mask    : (B, N_pre) bool — optional padding mask for pre memory
             M_mid_mask    : (B, N_mid) bool — optional padding mask for mid memory
+            z_film        : optional (gamma, beta) each (B, C) from FiLMConditioner.
+                            When provided, FiLM-conditions the cross-session attention
+                            query so that the retrieval pattern depends on the inferred
+                            treatment response latent z.
 
         Returns:
             out           : (B, HW, C) — updated features with cross-session context
@@ -314,8 +319,19 @@ class CrossSessionMemoryAttention(nn.Module):
         temp_bias = self.temporal_embed(weeks_typed)  # (B, 1, C)
         M_pre_temp = M_pre + temp_bias  # (B, N_pre, C)
 
+        # FiLM-condition the query when a change latent is available.
+        # This makes the cross-session attention pattern depend on z:
+        # a fast-responder z retrieves different memory tokens than a non-responder.
+        # Only the cross-session query is conditioned; within-session attention
+        # and the residual stream are unaffected.
+        if z_film is not None:
+            gamma, beta = z_film              # (B, C) each
+            query_for_cross = curr_features * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
+        else:
+            query_for_cross = curr_features
+
         cross_context, cross_attn_w = self.cross_session_attn(
-            query=curr_features,
+            query=query_for_cross,
             key=M_pre_temp,
             value=M_pre,  # value is un-perturbed memory
             key_padding_mask=M_pre_mask,

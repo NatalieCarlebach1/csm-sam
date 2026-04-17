@@ -260,3 +260,47 @@ literatures of training a bespoke network per benchmark. We view this
 portability as a reviewer-verifiable claim: the CSM-SAM row in each
 table is produced by a single code path with a single hyperparameter
 configuration, modulo output dimensionality.
+
+\subsection{Emergent Treatment Response Phenotyping}
+\label{sec:results:phenotype}
+
+The variational change latent $\mathbf{z}$ is trained with no phenotype
+labels: the only supervision is the segmentation loss and the KL divergence
+against the learned prior.  We therefore treat the correlation between the
+posterior mean $\boldsymbol{\mu}_q$ and the clinical volume-change ratio
+$\Delta V = (\mathrm{vol}(m_{\text{mid}}) - \mathrm{vol}(m_{\text{pre}})) /
+\mathrm{vol}(m_{\text{pre}})$ as a test of \emph{emergent} structure, not a
+supervised output.
+
+\paragraph{Protocol.}
+For each test patient (fold-0 hold-out), we compute $\boldsymbol{\mu}_q$
+from the trained encoder using the ground-truth pre/mid masks.  $\Delta V$ is
+computed from the same masks.  We project $\boldsymbol{\mu}_q$ onto its
+first principal component and report Spearman rank correlation with $\Delta V$.
+As a baseline confounder we report the correlation of pre-RT tumour volume
+$V_{\text{pre}}$ with $\Delta V$; this isolates how much of the signal in
+$\mathbf{z}$ is explained by tumour size alone.
+
+\paragraph{Result (to be filled in after training).}
+The expected result is:
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Signal & Spearman $\rho$ & $p$-value \\
+\midrule
+$V_{\text{pre}}$ (confounder) & $\approx 0.30$ & --- \\
+PC1 of $\boldsymbol{\mu}_q$ (ours, \emph{no supervision}) & $> 0.50$ & $< 0.01$ \\
+PC1 of $\boldsymbol{\mu}_q$ + $\Delta V$ probe (upper bound) & $> 0.70$ & $< 0.01$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+A value of $\rho > 0.5$ on the middle row, with $p < 0.01$, would confirm
+that the model has learned to represent treatment response phenotype as an
+emergent property of the segmentation objective.  The confounder row
+separates the signal from a size-based explanation.
+
+\paragraph{Qualitative.}
+Figure~\ref{fig:phenotype} (to be added) will show a t-SNE of
+$\boldsymbol{\mu}_q$ coloured by $\Delta V$ for all test patients, alongside
+two example patients from each extreme of the latent space
+(fast responder and non-responder) with their pre/mid mask overlays.

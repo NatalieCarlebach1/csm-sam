@@ -106,18 +106,26 @@ def compute_change_template(
 # ---------------------------------------------------------------------------
 
 class CrossPatientBank:
-    """Cosine top-K store over per-patient (pre_summary, change_template).
+    """Cosine top-K store over per-patient (pre_summary, change_template, z_posterior).
 
     Entries are stored detached on CPU (frozen reference tokens).
+
+    z_posterior (optional, d_z) stores the posterior mean computed by
+    ChangeLatentEncoder at bank-build time.  Used for retrieval-based latent
+    inference at test time: given a query patient's pre features, find the
+    K most similar training patients and blend their observed z values as an
+    empirical approximation of the posterior.
     """
 
     def __init__(self):
         self.ids: list[str] = []
         self.summaries: list[torch.Tensor] = []       # each: (C,)
         self.templates: list[torch.Tensor] = []       # each: (N_tokens, C)
+        self.z_posteriors: list[torch.Tensor] = []    # each: (d_z,) or empty
         self.weeks: list[int] = []
         self._summaries_t: torch.Tensor | None = None
         self._templates_t: torch.Tensor | None = None
+        self._z_posteriors_t: torch.Tensor | None = None
         self._dirty: bool = True
 
     def __len__(self) -> int:
@@ -129,6 +137,7 @@ class CrossPatientBank:
         pre_summary: torch.Tensor,
         change_template: torch.Tensor,
         weeks_elapsed: int,
+        z_posterior: torch.Tensor | None = None,
     ) -> None:
         if pre_summary.dim() != 1:
             raise ValueError(f"pre_summary must be (C,), got {tuple(pre_summary.shape)}")
@@ -138,15 +147,30 @@ class CrossPatientBank:
         self.summaries.append(pre_summary.detach().cpu().float())
         self.templates.append(change_template.detach().cpu().float())
         self.weeks.append(int(weeks_elapsed))
+        if z_posterior is not None:
+            if z_posterior.dim() != 1:
+                raise ValueError(f"z_posterior must be (d_z,), got {tuple(z_posterior.shape)}")
+            self.z_posteriors.append(z_posterior.detach().cpu().float())
+        else:
+            self.z_posteriors.append(torch.zeros(1))  # placeholder
         self._dirty = True
+
+    def has_z(self) -> bool:
+        """True when the bank was built with real z_posterior values (d_z > 1)."""
+        return len(self.z_posteriors) > 0 and self.z_posteriors[0].shape[0] > 1
 
     def _rebuild(self) -> None:
         if not self.summaries:
             self._summaries_t = None
             self._templates_t = None
+            self._z_posteriors_t = None
         else:
             self._summaries_t = torch.stack(self.summaries, dim=0)   # (N, C)
             self._templates_t = torch.stack(self.templates, dim=0)   # (N, N_tokens, C)
+            if self.has_z():
+                self._z_posteriors_t = torch.stack(self.z_posteriors, dim=0)  # (N, d_z)
+            else:
+                self._z_posteriors_t = None
         self._dirty = False
 
     def topk(
@@ -184,6 +208,39 @@ class CrossPatientBank:
             gathered = torch.cat([gathered, gathered[:, -1:].expand(B, pad, Nt, C)], dim=1)
         return top_idx, top_sims, gathered
 
+    def topk_z(
+        self,
+        query_pre_summary: torch.Tensor,
+        k: int = 5,
+        temperature: float = 0.1,
+    ) -> torch.Tensor | None:
+        """Retrieve weighted-mean z from top-K neighbors.
+
+        Returns (B, d_z) or None if bank has no z values.
+        Softmax weights are computed from cosine similarities with temperature τ.
+        """
+        if not self.has_z():
+            return None
+        if self._dirty:
+            self._rebuild()
+
+        device, dtype = query_pre_summary.device, query_pre_summary.dtype
+        bank_s = self._summaries_t.to(device=device, dtype=dtype)      # (N, C)
+        bank_z = self._z_posteriors_t.to(device=device, dtype=dtype)   # (N, d_z)
+
+        k_eff = min(k, bank_s.shape[0])
+        q = F.normalize(query_pre_summary, dim=-1)
+        s = F.normalize(bank_s, dim=-1)
+        sims = q @ s.t()                                                # (B, N)
+        top_sims, top_idx = sims.topk(k_eff, dim=-1)                   # (B, k_eff)
+
+        B, d_z = query_pre_summary.shape[0], bank_z.shape[1]
+        gathered_z = bank_z.index_select(0, top_idx.reshape(-1)).reshape(B, k_eff, d_z)
+
+        weights = F.softmax(top_sims / max(temperature, 1e-6), dim=-1)  # (B, k_eff)
+        z_ret = (weights.unsqueeze(-1) * gathered_z).sum(dim=1)          # (B, d_z)
+        return z_ret
+
     def save(self, path: str | Path) -> None:
         if self._dirty:
             self._rebuild()
@@ -194,6 +251,7 @@ class CrossPatientBank:
                 "ids": self.ids,
                 "summaries_t": self._summaries_t,
                 "templates_t": self._templates_t,
+                "z_posteriors_t": self._z_posteriors_t,
                 "weeks": self.weeks,
             },
             str(path),
@@ -210,6 +268,14 @@ class CrossPatientBank:
         bank.templates = list(tt.unbind(0)) if tt is not None else []
         bank._summaries_t = st
         bank._templates_t = tt
+        # Load z_posteriors if present (backward-compatible with old banks)
+        zt = obj.get("z_posteriors_t", None)
+        if zt is not None:
+            bank.z_posteriors = list(zt.unbind(0))
+            bank._z_posteriors_t = zt
+        else:
+            bank.z_posteriors = [torch.zeros(1)] * len(bank.ids)
+            bank._z_posteriors_t = None
         bank._dirty = False
         return bank
 

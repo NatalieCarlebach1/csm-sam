@@ -108,6 +108,19 @@ def _apply_channel_loss(
     )
 
 
+def _get_kl_beta(epoch: int, cfg) -> float:
+    """Compute the current KL annealing coefficient β(epoch)."""
+    cl_cfg = getattr(cfg, "change_latent", None)
+    if cl_cfg is None or not getattr(cl_cfg, "enabled", False):
+        return 0.0
+    from csmsam.modeling.change_latent import kl_beta as _kl_beta_fn
+    return _kl_beta_fn(
+        epoch=epoch,
+        beta_max=getattr(cl_cfg, "lambda_kl", 0.1),
+        warmup_epochs=getattr(cl_cfg, "kl_warmup_epochs", 10),
+    )
+
+
 def train_one_epoch(
     model: CSMSAM,
     loader,
@@ -121,10 +134,11 @@ def train_one_epoch(
 ) -> dict:
     """Single-slice training (fallback when sequence_mode=false)."""
     model.train()
-    total_losses = {"total": 0.0, "dice": 0.0, "bce": 0.0, "change": 0.0}
+    total_losses = {"total": 0.0, "dice": 0.0, "bce": 0.0, "change": 0.0, "kl": 0.0}
     n_steps = 0
     accumulate = cfg.training.accumulate_grad_batches
     gtvn_weight = getattr(cfg.loss, "gtvn_weight", 1.0)
+    kl_beta_val = _get_kl_beta(epoch, cfg)
 
     optimizer.zero_grad()
     pbar = tqdm(loader, desc=f"Epoch {epoch}", leave=False)
@@ -176,6 +190,14 @@ def train_one_epoch(
                 mid_masks=mid_masks,                   # combined (B, 1, H, W)
                 gtvn_weight=gtvn_weight,
             )
+            # KL loss from variational change latent (annealed)
+            kl = out.get("kl_loss")
+            if kl is not None and kl_beta_val > 0:
+                kl_weight = getattr(getattr(cfg, "change_latent", None), "lambda_kl", 0.1)
+                total_with_kl = losses["total"] + kl_weight * kl_beta_val * kl
+                losses = dict(losses)
+                losses["total"] = total_with_kl
+                losses["kl"] = kl.detach()
             loss = losses["total"] / accumulate
 
         scaler.scale(loss).backward()
@@ -229,11 +251,13 @@ def train_sequence_epoch(
       - Backward once after the full sequence (per effective grad-accum step).
     """
     model.train()
-    total_losses = {"total": 0.0, "dice": 0.0, "bce": 0.0, "change": 0.0}
+    total_losses = {"total": 0.0, "dice": 0.0, "bce": 0.0, "change": 0.0, "kl": 0.0}
     n_steps = 0
     accumulate = cfg.training.accumulate_grad_batches
     seq_len = max(1, int(cfg.training.sequence_length))
     gtvn_weight = getattr(cfg.loss, "gtvn_weight", 1.0)
+    kl_beta_val = _get_kl_beta(epoch, cfg)
+    kl_weight = getattr(getattr(cfg, "change_latent", None), "lambda_kl", 0.1)
 
     optimizer.zero_grad()
     pbar = tqdm(volume_loader, desc=f"Epoch {epoch} [seq]", leave=False)
@@ -281,7 +305,7 @@ def train_sequence_epoch(
             model.reset_mid_session_memory()
 
             seq_loss = None
-            seq_loss_components = {"dice": 0.0, "bce": 0.0, "change": 0.0}
+            seq_loss_components = {"dice": 0.0, "bce": 0.0, "change": 0.0, "kl": 0.0}
             n_in_seq = 0
 
             for i in range(window.start, window.stop):
@@ -316,6 +340,14 @@ def train_sequence_epoch(
                     mid_masks=mm,
                     gtvn_weight=gtvn_weight,
                 )
+
+                # KL from variational change latent (annealed)
+                kl = out.get("kl_loss")
+                if kl is not None and kl_beta_val > 0:
+                    total_with_kl = losses["total"] + kl_weight * kl_beta_val * kl
+                    losses = dict(losses)
+                    losses["total"] = total_with_kl
+                    losses["kl"] = kl.detach()
 
                 step_loss = losses["total"]
                 seq_loss = step_loss if seq_loss is None else seq_loss + step_loss

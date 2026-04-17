@@ -40,6 +40,12 @@ from .retrieval import (
     compute_pre_summary,
     compute_change_template,
 )
+from .change_latent import (
+    ChangeLatentEncoder,
+    ChangePrior,
+    FiLMConditioner,
+    kl_divergence,
+)
 
 
 class CSMSAM(nn.Module):
@@ -62,12 +68,21 @@ class CSMSAM(nn.Module):
         retrieval_k: int = 5,
         retrieval_n_tokens: int = 16,
         retrieval_gate_init: float = 0.0,
+        # --- Variational Change Latent ---
+        use_change_latent: bool = True,
+        d_z: int = 64,
+        latent_alpha: float = 0.5,
+        latent_retrieval_tau: float = 0.1,
     ):
         super().__init__()
         self.sam2 = sam2_model
         self.memory_bank_max_slices = memory_bank_max_slices
         self.use_cross_patient_retrieval = use_cross_patient_retrieval
         self.retrieval_n_tokens = retrieval_n_tokens
+        self.use_change_latent = use_change_latent
+        self.d_z = d_z
+        self.latent_alpha = latent_alpha
+        self.latent_retrieval_tau = latent_retrieval_tau
 
         # Novel modules (trainable)
         self.memory_encoder = CrossSessionMemoryEncoder(
@@ -97,6 +112,16 @@ class CSMSAM(nn.Module):
         else:
             self.retrieval = None
         self.patient_bank: CrossPatientBank | None = None
+
+        # Variational change latent modules (optional).
+        if use_change_latent:
+            self.latent_encoder = ChangeLatentEncoder(d_model=d_model, d_z=d_z)
+            self.change_prior    = ChangePrior(d_model=d_model, d_z=d_z)
+            self.film_cond       = FiLMConditioner(d_z=d_z, d_model=d_model)
+        else:
+            self.latent_encoder = None
+            self.change_prior   = None
+            self.film_cond      = None
 
         self._freeze_sam2_encoder()
 
@@ -261,6 +286,24 @@ class CSMSAM(nn.Module):
             else:
                 weeks_list = [int(weeks_elapsed)] * B
 
+            # Compute z_posterior for each patient if latent encoder is available.
+            z_posteriors: list[torch.Tensor | None] = [None] * B
+            if self.latent_encoder is not None:
+                f_pre_gap = summary                                  # (B, C)
+                f_mid_gap = mid_feats.mean(dim=[2, 3, 4]) if mid_feats.dim() == 5 \
+                    else mid_feats.mean(dim=[2, 3])                  # (B, C)
+                # Handle 5D mid_feats (B, N, C, h, w) → mean over slices and spatial
+                if mid_feats.dim() == 5:
+                    f_mid_gap = mid_feats.mean(dim=1).mean(dim=[2, 3])   # (B, C)
+                else:
+                    f_mid_gap = mid_feats.mean(dim=[2, 3])               # (B, C)
+                weeks_t_f = torch.tensor(
+                    [float(w) for w in weeks_list], device=device, dtype=torch.float32
+                )
+                mu_q, _ = self.latent_encoder(f_pre_gap, f_mid_gap, weeks_t_f)
+                for b in range(B):
+                    z_posteriors[b] = mu_q[b]
+
             for b in range(B):
                 pid = patient_ids[b] if patient_ids is not None else f"patient_{len(bank)}"
                 bank.add(
@@ -268,6 +311,7 @@ class CSMSAM(nn.Module):
                     pre_summary=summary[b],
                     change_template=template[b],
                     weeks_elapsed=int(weeks_list[b]),
+                    z_posterior=z_posteriors[b],
                 )
 
         self.patient_bank = bank
@@ -284,6 +328,7 @@ class CSMSAM(nn.Module):
         return_change_map: bool = True,
         detach_memory: bool = False,
         retrieved_memory: torch.Tensor | None = None,
+        training_mode: bool | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Forward pass for mid-RT segmentation.
@@ -299,6 +344,9 @@ class CSMSAM(nn.Module):
             detach_memory  : if True, detach features when appending to M_mid
                              (use during evaluation to save memory; during
                              sequence training keep False so gate gets gradient)
+            training_mode  : override self.training for latent mode selection.
+                             When True: compute posterior z (needs both sessions).
+                             When False/None: use prior + retrieval z (inference).
 
         Returns:
             dict:
@@ -306,8 +354,11 @@ class CSMSAM(nn.Module):
                 "change_map"  : (B, 4, H, W)
                 "gate_vals"   : (B, h, w)
                 "attn_weights": (B, HW, N_pre)
+                "z_posterior" : (B, d_z) posterior mean, or None
+                "kl_loss"     : scalar KL divergence, or None
         """
         B, _, H, W = mid_images.shape
+        is_training = self.training if training_mode is None else training_mode
 
         if weeks_elapsed is None:
             weeks_elapsed = torch.full((B,), 3, dtype=torch.long, device=mid_images.device)
@@ -319,17 +370,58 @@ class CSMSAM(nn.Module):
         # 2. Flatten spatial dims
         mid_feats_flat = mid_feats.permute(0, 2, 3, 1).reshape(B, h * w, C)
 
+        # ---------------------------------------------------------------
+        # Variational change latent
+        # ---------------------------------------------------------------
+        z_posterior_mean: torch.Tensor | None = None
+        kl_loss: torch.Tensor | None = None
+        z_film: tuple[torch.Tensor, torch.Tensor] | None = None
+
+        if self.use_change_latent:
+            # Global summaries used by both posterior and prior
+            f_pre_gap = M_pre.mean(dim=1)                    # (B, C)
+            weeks_f   = weeks_elapsed.float()
+
+            if is_training and pre_images is not None:
+                # Training: compute posterior q(z | f_pre, f_mid, t)
+                f_mid_gap = mid_feats.mean(dim=[2, 3])        # (B, C)
+                mu_q, lv_q = self.latent_encoder(f_pre_gap, f_mid_gap, weeks_f)
+                mu_p, lv_p = self.change_prior(f_pre_gap, weeks_f)
+
+                z = ChangeLatentEncoder.reparameterize(mu_q, lv_q)
+                kl_loss = kl_divergence(mu_q, lv_q, mu_p, lv_p)
+                z_posterior_mean = mu_q.detach()
+            else:
+                # Inference: use prior blended with retrieval-based z
+                mu_p, lv_p = self.change_prior(f_pre_gap, weeks_f)
+                z = mu_p  # start from prior mean
+
+                if self.patient_bank is not None and self.patient_bank.has_z():
+                    z_ret = self.patient_bank.topk_z(
+                        f_pre_gap,
+                        k=self.retrieval.k if self.retrieval is not None else 5,
+                        temperature=self.latent_retrieval_tau,
+                    )
+                    if z_ret is not None:
+                        z = (1.0 - self.latent_alpha) * mu_p + self.latent_alpha * z_ret
+
+                z_posterior_mean = z.detach()
+
+            gamma, beta = self.film_cond(z)
+            z_film = (gamma, beta)
+
         # 2b. Augment M_pre with retrieved cross-patient memory tokens.
         M_pre_aug = M_pre
         if retrieved_memory is not None and retrieved_memory.numel() > 0:
             M_pre_aug = torch.cat([M_pre, retrieved_memory], dim=1)
 
-        # 3. Cross-session memory attention
+        # 3. Cross-session memory attention (FiLM-conditioned when z available)
         enhanced_feats, attn_w, gate_vals = self.cross_session_attn(
             curr_features=mid_feats_flat,
             M_pre=M_pre_aug,
             M_mid=self._M_mid,
             weeks_elapsed=weeks_elapsed,
+            z_film=z_film,
         )
 
         # 4. Update within-session memory.
@@ -356,6 +448,8 @@ class CSMSAM(nn.Module):
             "masks": masks,
             "gate_vals": gate_vals.reshape(B, h, w),
             "attn_weights": attn_w.mean(dim=1),               # (B, HW, N_pre)
+            "z_posterior": z_posterior_mean,                  # (B, d_z) or None
+            "kl_loss": kl_loss,                               # scalar or None
         }
 
         # 7. Change map
@@ -502,6 +596,12 @@ class CSMSAM(nn.Module):
         )
         if self.retrieval is not None:
             novel_params += list(self.retrieval.parameters())
+        if self.latent_encoder is not None:
+            novel_params += list(self.latent_encoder.parameters())
+        if self.change_prior is not None:
+            novel_params += list(self.change_prior.parameters())
+        if self.film_cond is not None:
+            novel_params += list(self.film_cond.parameters())
 
         decoder_params = []
         if hasattr(self.sam2, "sam_mask_decoder"):
@@ -522,6 +622,12 @@ class CSMSAM(nn.Module):
         }
         if self.retrieval is not None:
             groups["retrieval"] = self.retrieval
+        if self.latent_encoder is not None:
+            groups["latent_encoder"] = self.latent_encoder
+        if self.change_prior is not None:
+            groups["change_prior"] = self.change_prior
+        if self.film_cond is not None:
+            groups["film_conditioner"] = self.film_cond
         counts = {name: sum(p.numel() for p in m.parameters() if p.requires_grad) for name, m in groups.items()}
         counts["total"] = sum(counts.values())
         return counts
