@@ -10,24 +10,31 @@ This repository implements **RALM-SAM** — a retrieval-augmented longitudinal m
 
 ## Architecture
 - **Frozen**: SAM2 image encoder (ViT-H) + most of the mask decoder (final layer trainable).
-- **Trainable (~2M params total)**:
+- **Trainable (~2.7M params total)**:
   - `CrossSessionMemoryAttention` — cross-session (attn to M_aug) + within-session (attn to M_mid) + learned gate.
   - Continuous-time encoder — sinusoidal + MLP over weeks-elapsed (discrete `nn.Embedding` retained as ablation via `temporal_encoder_type: discrete`).
-  - `CrossPatientRetrieval` + `CrossPatientBank` — top-K retrieval of pre-RT neighbors; injects their tumor-localized `(mid - pre)` change templates as extra tokens onto M_pre.
+  - `CrossPatientRetrieval` + `CrossPatientBank` — top-K retrieval of pre-RT neighbors; injects their tumor-localized `(mid - pre)` change templates as extra tokens onto M_pre. Bank now also stores `z_posterior` per patient for latent retrieval.
   - `ChangeHead` — 3-class change map (stable/grown/shrunk), XOR-supervised.
   - `FeatureEvolutionPredictor` (~200k params) — predicts mid-RT features from pre-RT + t; drives the consistency loss.
   - Dual-head decoder — per-structure GTVp / GTVn via pre-RT mask prompting of SAM2.
+  - **`ChangeLatentEncoder`** — posterior q(z | f_pre, f_mid, t) → (μ_q, log_σ_q²); d_z=64.
+  - **`ChangePrior`** — prior p(z | f_pre, t) → (μ_p, log_σ_p²); trained via KL(q‖p).
+  - **`FiLMConditioner`** — z → (γ, β) FiLM-conditions the cross-session attention query.
 - **Training mode**: sequence training accumulates M_mid across consecutive mid-RT slices so the within-session attention and gate actually learn.
-- **Loss**: `L_dice + 0.3 * CE(change_map) + 0.2 * L_consistency`, where `L_consistency = || g(pre_features, t) - mid_features ||^2` on tumor regions.
+- **Loss**: `L_dice + L_BCE + 0.3 * CE(change_map) + 0.2 * L_consistency + β(e) * 0.1 * KL(q‖p)`, where β(e) ramps from 0→1 over 10 epochs (prevents posterior collapse).
+
+## Core Scientific Claim (natalie/dev)
+The variational change latent z, trained **purely on the segmentation objective with no phenotype labels**, should organise into clusters that correlate with the volume-change ratio ΔV = (vol_mid − vol_pre) / vol_pre — an emergent treatment response phenotyping property verified post-hoc via Spearman ρ on held-out patients. This is the contribution that makes the paper impossible to reject as "SAM + attention + change detection".
 
 ## Repository Structure
 ```
 csm-sam/
 ├── csmsam/
 │   ├── modeling/
-│   │   ├── cross_session_memory_attention.py   # Core cross/within-session attention + gate
-│   │   ├── retrieval.py                        # CrossPatientBank, CrossPatientRetrieval
-│   │   ├── csm_sam.py                          # Full RALM-SAM wrapper (dual-head decoder)
+│   │   ├── cross_session_memory_attention.py   # Core cross/within-session attention + gate (z_film support)
+│   │   ├── change_latent.py                    # ChangeLatentEncoder, ChangePrior, FiLMConditioner, kl_divergence
+│   │   ├── retrieval.py                        # CrossPatientBank (+ z_posterior), CrossPatientRetrieval
+│   │   ├── csm_sam.py                          # Full RALM-SAM wrapper (dual-head decoder + latent)
 │   │   └── change_head.py                      # Change map prediction
 │   ├── datasets/                               # 8 dataset loaders, uniform __getitem__ contract
 │   │   ├── hnts_mrg.py                         # HNTS-MRG 2024 (primary; pre-RT + mid-RT)
@@ -133,7 +140,7 @@ Dataset dispatch:
 Override device with `DEVICE=cpu bash scripts/run_all_baselines.sh`; default is `cuda`.
 
 ## Key Design Decisions
-- **Why SAM2 not nnUNet?** 150 training patients is small; SAM2's frozen ViT-H pretrained on 1B masks provides strong priors. We only train ~2M params.
+- **Why SAM2 not nnUNet?** 150 training patients is small; SAM2's frozen ViT-H pretrained on 1B masks provides strong priors. We only train ~2.7M params.
 - **Why cross-session not within-session?** Within-session memory (MedSAM2) propagates slice→slice inside one 3D scan. We propagate visit→visit (week 0 → week 2-3), which is structurally novel.
 - **Why retrieval?** Each patient has only 2 time points, so per-patient trajectory learning is data-starved. Cross-patient retrieval pools evolution signals across the training set at inference, turning CSM-SAM into an in-context longitudinal segmenter.
 - **Why continuous-time conditioning?** Weeks-elapsed is a continuous covariate (1–4+ weeks, real-valued); a discrete embedding wastes capacity and fails to extrapolate. A sinusoidal+MLP `f(t)` generalizes across arbitrary intervals.
@@ -141,6 +148,12 @@ Override device with `DEVICE=cpu bash scripts/run_all_baselines.sh`; default is 
 - **Why change map?** Provides free supervision from pre/mid mask XOR; makes the model spatially aware of tumor dynamics.
 - **Why dual-head decoder?** GTVp and GTVn have very different appearances and priors; per-structure prompting via the pre-RT mask beats a single-argmax head.
 - **Why sequence-mode training?** Without accumulating M_mid across slices, the within-session attention receives an empty bank and the gate collapses to using only cross-session context.
+- **Why variational change latent?** Compresses treatment response into a d_z=64 latent z. Trained via KL(q‖p) against a learned prior — NOT a unit Gaussian — so the prior learns population-level response distributions. FiLM-conditions the attention query so different phenotype zs retrieve different memory tokens. At inference, blends prior z with retrieval from the bank of stored posterior means.
+- **Why β-KL annealing?** Without warmup, the KL crushes the posterior before the segmentation loss has shaped z, causing collapse to z≈0 for all patients. Ramp β 0→0.1 over 10 epochs.
+- **Why KL against learned prior not unit Gaussian?** Unit Gaussian KL forces all patients to the same z, destroying phenotype structure. The learned prior p(z|f_pre,t) allows different pre-RT appearances to have different z priors.
+
+## Tests
+`tests/test_change_latent.py` — 42 tests covering all new modules. Run with `python tests/test_change_latent.py`.
 
 ## Data Access
 HNTS-MRG 2024 is available on Zenodo (DOI: 10.5281/zenodo.11199559) and via Grand Challenge. Registration required. See `data/download_hnts_mrg.py` for instructions.
@@ -150,6 +163,7 @@ HNTS-MRG 2024 is available on Zenodo (DOI: 10.5281/zenodo.11199559) and via Gran
 - **HD95**: Secondary. 95th percentile Hausdorff distance.
 - **Change map IoU**: Ablation metric for the change prediction head.
 - **Feature consistency MSE**: Ablation metric for the evolution predictor.
+- **Spearman ρ(PC1(μ_q), ΔV)**: Post-hoc emergent phenotype metric. Target >0.5 with p<0.01 on held-out patients, without ΔV supervision. Computed after training; not part of the loss.
 
 ## Reference documents
 - `baselines/LANDSCAPE.md` — 6-axis positioning system (temporal scope / pre-signal / backbone / params / change head / temporal embed) with one row per baseline and CSM-SAM placed in the top-right "strongest-backbone × richest-pre-session-mechanism" quadrant.

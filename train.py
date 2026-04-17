@@ -376,7 +376,7 @@ def train_sequence_epoch(
             scheduler.step()
 
         total_losses["total"] += seq_loss.item()
-        for k in ("dice", "bce", "change"):
+        for k in ("dice", "bce", "change", "kl"):
             total_losses[k] += seq_loss_components[k] / max(n_in_seq, 1)
         n_steps += 1
 

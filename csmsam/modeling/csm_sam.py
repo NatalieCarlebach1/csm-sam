@@ -290,13 +290,8 @@ class CSMSAM(nn.Module):
             z_posteriors: list[torch.Tensor | None] = [None] * B
             if self.latent_encoder is not None:
                 f_pre_gap = summary                                  # (B, C)
-                f_mid_gap = mid_feats.mean(dim=[2, 3, 4]) if mid_feats.dim() == 5 \
-                    else mid_feats.mean(dim=[2, 3])                  # (B, C)
-                # Handle 5D mid_feats (B, N, C, h, w) → mean over slices and spatial
-                if mid_feats.dim() == 5:
-                    f_mid_gap = mid_feats.mean(dim=1).mean(dim=[2, 3])   # (B, C)
-                else:
-                    f_mid_gap = mid_feats.mean(dim=[2, 3])               # (B, C)
+                # mid_feats is (B, N, C, h, w) here — average over N slices then spatial
+                f_mid_gap = mid_feats.mean(dim=1).mean(dim=[2, 3])  # (B, C)
                 weeks_t_f = torch.tensor(
                     [float(w) for w in weeks_list], device=device, dtype=torch.float32
                 )

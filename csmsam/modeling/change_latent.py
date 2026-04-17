@@ -45,35 +45,6 @@ import torch.nn.functional as F
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _sinusoidal_encoding(
-    t: torch.Tensor,
-    d_out: int,
-    n_freq: int = 8,
-    normalize_by: float = 12.0,
-) -> torch.Tensor:
-    """Map scalar weeks_elapsed (B,) to sinusoidal features (B, d_out).
-
-    Uses n_freq log₂-spaced frequencies, then a small linear projection to
-    d_out.  Separate from the ContinuousTimeEncoder in attention so the latent
-    encoder learns its own temporal embedding.
-    """
-    t = t.float() / normalize_by                      # (B,)
-    freqs = 2.0 ** torch.arange(n_freq, device=t.device, dtype=torch.float32)
-    ang = t.unsqueeze(-1) * freqs.unsqueeze(0)        # (B, n_freq)
-    feats = torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1)  # (B, 2*n_freq)
-    if 2 * n_freq == d_out:
-        return feats
-    # Linear projection to d_out (no bias; the MLP downstream adds bias)
-    if not hasattr(_sinusoidal_encoding, "_proj") or \
-            _sinusoidal_encoding._proj.weight.shape != (d_out, 2 * n_freq):
-        # Lazily-created linear; not ideal but avoids carrying extra state here.
-        # In practice callers use SinusoidalTimeEncoder instead.
-        proj = nn.Linear(2 * n_freq, d_out, bias=False).to(t.device)
-        nn.init.normal_(proj.weight, std=0.02)
-        _sinusoidal_encoding._proj = proj
-    return _sinusoidal_encoding._proj(feats)
-
-
 class SinusoidalTimeEncoder(nn.Module):
     """Shared sinusoidal → MLP temporal encoder for the latent modules.
 
