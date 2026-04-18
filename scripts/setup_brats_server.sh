@@ -1,69 +1,97 @@
 #!/bin/bash
 # One-shot setup + launch script for TAU rack-wolf-g01
-# Run from the repo root:  bash scripts/setup_brats_server.sh
+# All conda/pip/data goes to /media/data1/talshah to avoid home disk full.
+#
+# Run from the repo root:
+#   bash scripts/setup_brats_server.sh
 
 set -e
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
+# ── All heavy I/O redirected to data1 ─────────────────────────────────────
+DATA_ROOT="/media/data1/talshah"
+CONDA_ENVS="$DATA_ROOT/conda/envs"
+CONDA_PKGS="$DATA_ROOT/conda/pkgs"
+PIP_CACHE="$DATA_ROOT/pip_cache"
+TMPDIR="$DATA_ROOT/tmp"
+BRATS_DIR="$DATA_ROOT/BraTS_GLI"
+SAM2_CKPT="$DATA_ROOT/checkpoints/sam2.1_hiera_large.pt"
+LOGS_DIR="$REPO_DIR/logs"
+
+mkdir -p "$CONDA_ENVS" "$CONDA_PKGS" "$PIP_CACHE" "$TMPDIR" \
+         "$DATA_ROOT/checkpoints" "$LOGS_DIR"
+
+export TMPDIR
+export PIP_CACHE_DIR="$PIP_CACHE"
+export CONDA_PKGS_DIRS="$CONDA_PKGS"
+
 echo "============================================================"
 echo " CSM-SAM BraTS-GLI Setup — TAU rack-wolf-g01"
 echo " $(date)"
+echo " All data/envs → $DATA_ROOT"
 echo "============================================================"
 
 # ── 1. Conda environment ──────────────────────────────────────────────────
-if conda info --envs | grep -q "^csmsam "; then
-    echo "[1/6] conda env 'csmsam' already exists — activating"
+conda config --add pkgs_dirs  "$CONDA_PKGS"  2>/dev/null || true
+conda config --add envs_dirs  "$CONDA_ENVS"  2>/dev/null || true
+
+ENV_PATH="$CONDA_ENVS/csmsam"
+if [ -d "$ENV_PATH" ]; then
+    echo "[1/6] conda env already exists: $ENV_PATH"
 else
-    echo "[1/6] Creating conda env 'csmsam' (Python 3.10)"
-    conda create -y -n csmsam python=3.10
+    echo "[1/6] Creating conda env 'csmsam' (Python 3.10) in $CONDA_ENVS"
+    conda create -y -p "$ENV_PATH" python=3.10
 fi
+
 source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate csmsam
+conda activate "$ENV_PATH"
+echo "  Active env: $(which python)"
 
 # ── 2. PyTorch (CUDA 12.1) ────────────────────────────────────────────────
 echo "[2/6] Installing PyTorch with CUDA 12.1"
-pip install --quiet torch torchvision torchaudio \
+pip install --quiet --cache-dir "$PIP_CACHE" \
+    torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu121
 
-python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available!'; \
-    print(f'  torch {torch.__version__}, CUDA {torch.version.cuda}, GPUs: {torch.cuda.device_count()}')"
+python -c "
+import torch
+assert torch.cuda.is_available(), 'CUDA not available!'
+print(f'  torch {torch.__version__}, CUDA {torch.version.cuda}, GPUs: {torch.cuda.device_count()}')
+"
 
 # ── 3. SAM2 ───────────────────────────────────────────────────────────────
 echo "[3/6] Installing SAM2"
 if python -c "import sam2" 2>/dev/null; then
     echo "  SAM2 already installed"
 else
-    pip install --quiet "git+https://github.com/facebookresearch/sam2.git"
+    pip install --quiet --cache-dir "$PIP_CACHE" \
+        "git+https://github.com/facebookresearch/sam2.git"
 fi
 
 # ── 4. Project dependencies ───────────────────────────────────────────────
 echo "[4/6] Installing project dependencies"
-pip install --quiet -e ".[dev]"
-pip install --quiet huggingface_hub omegaconf tqdm
+pip install --quiet --cache-dir "$PIP_CACHE" -e ".[dev]"
+pip install --quiet --cache-dir "$PIP_CACHE" huggingface_hub omegaconf tqdm
 
 # ── 5. SAM2 checkpoint ────────────────────────────────────────────────────
-echo "[5/6] Downloading SAM2-L checkpoint"
-mkdir -p checkpoints/sam2
-CKPT="checkpoints/sam2/sam2.1_hiera_large.pt"
-if [ -f "$CKPT" ]; then
-    echo "  Checkpoint already exists: $CKPT"
+echo "[5/6] Downloading SAM2-L checkpoint → $SAM2_CKPT"
+if [ -f "$SAM2_CKPT" ]; then
+    echo "  Already exists"
 else
-    wget -q --show-progress \
+    wget --show-progress \
         "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt" \
-        -O "$CKPT"
-    echo "  Saved to $CKPT"
+        -O "$SAM2_CKPT"
 fi
 
 # ── 6. Download BraTS-GLI ─────────────────────────────────────────────────
-echo "[6/6] Downloading BraTS-GLI 2024 (~17 GB)"
-if [ -d "data/raw/BraTS_GLI/Training" ] && [ "$(ls -A data/raw/BraTS_GLI/Training 2>/dev/null)" ]; then
-    echo "  Data already present at data/raw/BraTS_GLI/"
+echo "[6/6] Downloading BraTS-GLI 2024 (~17 GB) → $BRATS_DIR"
+if [ -d "$BRATS_DIR/Training" ] && [ "$(ls -A "$BRATS_DIR/Training" 2>/dev/null)" ]; then
+    echo "  Data already present"
 else
-    # Pass your HF token here or export HF_TOKEN before running this script
     python data/download_brats_gli.py \
-        --output_dir data/raw/BraTS_GLI \
+        --output_dir "$BRATS_DIR" \
         ${HF_TOKEN:+--token "$HF_TOKEN"}
 fi
 
@@ -73,11 +101,17 @@ echo " Setup complete. Launching 8-GPU training..."
 echo "============================================================"
 echo ""
 
-# ── Launch ────────────────────────────────────────────────────────────────
+# ── Launch training ───────────────────────────────────────────────────────
+LOG_FILE="$LOGS_DIR/brats_train_$(date +%Y%m%d_%H%M%S).log"
+echo "Log: $LOG_FILE"
+
 torchrun \
     --nproc_per_node=8 \
     --master_port=29500 \
     train_brats.py \
     --config configs/brats.yaml \
+    --data_dir "$BRATS_DIR" \
+    --output_dir "$DATA_ROOT/checkpoints/csmsam_brats" \
+    --sam2_checkpoint "$SAM2_CKPT" \
     --sequence_train \
-    2>&1 | tee logs/brats_train_$(date +%Y%m%d_%H%M%S).log
+    2>&1 | tee "$LOG_FILE"
