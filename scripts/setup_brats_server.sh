@@ -97,7 +97,7 @@ fi
 
 echo ""
 echo "============================================================"
-echo " Setup complete. Launching 8-GPU training..."
+echo " Setup complete. Launching 4-GPU training (GPUs 4-7)..."
 echo "============================================================"
 echo ""
 
@@ -105,8 +105,11 @@ echo ""
 LOG_FILE="$LOGS_DIR/brats_train_$(date +%Y%m%d_%H%M%S).log"
 echo "Log: $LOG_FILE"
 
+# GPUs 4-7 for training; GPUs 0-3 reserved for baselines
+export CUDA_VISIBLE_DEVICES=4,5,6,7
+
 torchrun \
-    --nproc_per_node=8 \
+    --nproc_per_node=4 \
     --master_port=29500 \
     train_brats.py \
     --config configs/brats.yaml \

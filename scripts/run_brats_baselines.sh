@@ -21,6 +21,9 @@ OUTPUT_DIR="${OUTPUT_DIR:-$DATA_ROOT/results/brats_baselines}"
 DEVICE="${DEVICE:-cuda}"
 IMAGE_SIZE="${IMAGE_SIZE:-512}"
 
+# GPUs 0-3 reserved for baselines; GPUs 4-7 for training
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
 # Activate the csmsam conda env
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$DATA_ROOT/conda/envs/csmsam"
