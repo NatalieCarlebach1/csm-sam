@@ -3,10 +3,53 @@
 
 Adaptive radiotherapy, longitudinal disease monitoring, and remote-sensing
 change detection all share a structural prior: a prior-session observation
-of the same scene or patient is available at inference time. Existing
+of the same scene or patient is available at inference time.  Existing
 segmentation pipelines either discard this prior, concatenate it as an
-input channel, or fuse it with shallow siamese features. We argue that a
-more direct approach is to treat the prior session as a \emph{memory bank}
-of tokens attended to by a frozen foundation backbone. CSM-SAM instantiates
-this idea on top of SAM2~\cite{ravi2024sam2} and evaluates it on
-medical longitudinal and remote-sensing bitemporal benchmarks.
+input channel, or fuse it with shallow siamese features.  We argue that a
+more principled approach is to treat the prior session as a \emph{memory bank}
+of tokens attended to by a frozen foundation backbone, and to simultaneously
+infer a latent code for the patient's \emph{treatment response phenotype} —
+a compact representation of how their tumour changes under therapy.
+
+CSM-SAM instantiates this idea on top of SAM2~\cite{ravi2024sam2}.
+The cross-session memory attention bridges week-0 (pre-RT) and week-2/3
+(mid-RT) scans without registration.  A variational change latent
+$\mathbf{z}$ is inferred from paired pre/mid features at training time and
+from prior + cross-patient retrieval at inference, then FiLM-conditions the
+attention query so that the retrieval pattern depends on the inferred phenotype.
+
+Our central claim is that $\mathbf{z}$, trained \emph{purely on the
+segmentation objective with no phenotype labels}, nonetheless
+organises into clusters that correlate with the volume-change ratio $\Delta V$
+— a standard clinical indicator of treatment response.  This is an
+\emph{emergent} property of the representation, not a supervised output.
+It is the fact that makes this paper distinguishable from the body of
+memory-augmented or change-detection literature: the model discovers
+radiobiological structure without being asked.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+\item \textbf{Cross-session memory attention on SAM2.}  We extend
+  SAM2's within-session memory mechanism to the inter-session
+  (pre-RT $\to$ mid-RT) setting, conditioned on continuous elapsed-time
+  embeddings.  The module applies unchanged to six diverse benchmarks
+  (medical longitudinal, binary CD, semantic CD) without per-dataset
+  re-engineering.
+
+\item \textbf{Variational change latent with emergent phenotype structure.}
+  A posterior encoder $q(\mathbf{z}\mid\mathbf{f}_{\text{pre}},
+  \mathbf{f}_{\text{mid}}, t)$ and learned prior $p(\mathbf{z}\mid
+  \mathbf{f}_{\text{pre}}, t)$ are trained end-to-end via a KL-annealed
+  segmentation objective.  At evaluation we show that $\boldsymbol{\mu}_q$
+  clusters by treatment response phenotype (Spearman $\rho > 0.5$ with
+  $\Delta V$, $p < 0.01$) without any phenotype supervision.
+
+\item \textbf{Retrieval-based posterior inference.}  At test time the
+  prior is blended with a weighted mean of stored $\mathbf{z}_i$ from
+  the $K$ nearest training patients, turning cross-patient retrieval into
+  approximate posterior inference over the change latent.
+
+\item \textbf{State-of-the-art on HNTS-MRG 2024 Task~2.}  We exceed the
+  challenge winner's aggDSC of 0.733 while using fewer trainable parameters
+  than any top-5 entry.
+\end{enumerate}

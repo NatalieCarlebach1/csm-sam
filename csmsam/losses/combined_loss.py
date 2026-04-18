@@ -129,6 +129,7 @@ class CombinedLoss(nn.Module):
         lambda_consistency: float = 0.2,
         consistency_fg: float = 1.0,
         consistency_bg: float = 0.1,
+        lambda_kl: float = 0.0,
     ):
         super().__init__()
         self.lambda_dice = lambda_dice
@@ -136,6 +137,7 @@ class CombinedLoss(nn.Module):
         self.lambda_change = lambda_change
         self.gtvn_weight = gtvn_weight
         self.lambda_consistency = lambda_consistency
+        self.lambda_kl = lambda_kl
 
         self.dice_loss = DiceLoss(smooth=1.0)
         self.change_loss = ChangeMapLoss(weight=change_loss_weights)
@@ -161,6 +163,8 @@ class CombinedLoss(nn.Module):
         predicted_mid_features: torch.Tensor | None = None,
         actual_mid_features: torch.Tensor | None = None,
         union_mask: torch.Tensor | None = None,
+        kl_loss: torch.Tensor | None = None,
+        kl_beta: float = 1.0,
     ) -> dict[str, torch.Tensor]:
         """
         Args:
@@ -263,5 +267,16 @@ class CombinedLoss(nn.Module):
             total = total + self.lambda_consistency * l_consistency
             losses["consistency"] = l_consistency.detach()
             losses["total"] = total
+
+        # KL divergence (variational change latent).
+        # kl_beta is the annealing coefficient — passed by the training loop so
+        # it can ramp from 0 to lambda_kl over the warmup period without
+        # requiring a stateful loss module.
+        if kl_loss is not None and kl_beta > 0:
+            effective_kl_weight = self.lambda_kl * kl_beta
+            if effective_kl_weight > 0:
+                total = total + effective_kl_weight * kl_loss
+                losses["kl"] = kl_loss.detach()
+                losses["total"] = total
 
         return losses

@@ -58,6 +58,15 @@ retrieval:
   build_on: "train"    # which split to build the bank from
   bank_path: null      # optional path to save/load bank
 
+# ─── Variational Change Latent ───────────────────────────────────────────────
+change_latent:
+  enabled: true        # set false to ablate (reverts to base CSM-SAM)
+  d_z: 64              # latent dimensionality
+  lambda_kl: 0.1       # max KL weight (after warmup)
+  kl_warmup_epochs: 10 # ramp beta from 0 → lambda_kl over this many epochs
+  alpha: 0.5           # inference blend: (1-alpha)*prior + alpha*retrieval_z
+  retrieval_tau: 0.1   # softmax temperature for retrieval weights
+
 # ─── Evaluation ──────────────────────────────────────────────────────────────
 evaluation:
   val_every_n_epochs: 5               # validate every N epochs

@@ -1,4 +1,4 @@
-\section{Ablations}
+\section{Ablation Studies}
 \label{sec:ablations}
 
 Table~\ref{tab:ablation} reports single-axis ablations of CSM-SAM on
@@ -10,3 +10,56 @@ continuous weeks-elapsed embedding is removed to test temporal
 calibration; and, as a non-attention control, pre/mid are fed as a
 dual-modality input to the SAM2 encoder instead of via memory.
 \input{tables/ablation}
+
+\subsection{Variational Change Latent}
+\label{sec:ablations:latent}
+
+Table~\ref{tab:ablation_latent} isolates each component of the variational
+change latent.  All rows use the same base model (cross-session attention +
+change head + continuous time); only the latent module changes.
+
+\begin{table}[h]
+\centering
+\caption{Ablation of the variational change latent on HNTS-MRG Task~2.
+The Spearman $\rho$ column tests the emergent phenotype claim without any
+$\Delta V$ supervision in training.}
+\label{tab:ablation_latent}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+Model variant & aggDSC $\uparrow$ & HD95 $\downarrow$
+              & Spearman $\rho(\mathbf{z}, \Delta V)$ & $\Delta$ Params \\
+\midrule
+Base (no latent)                           & --   & -- & n/a   & ---  \\
+$+$ prior only ($\alpha{=}0$)              & --   & -- & --    & $+$716k \\
+$+$ retrieval only ($\alpha{=}1$)          & --   & -- & --    & $+$716k \\
+$+$ blended ($\alpha{=}0.5$)              & --   & -- & --    & $+$716k \\
+$+$ FiLM conditioning                     & --   & -- & --    & $+$716k \\
+\textbf{Full} ($+$ $\beta$-KL annealing)  & --   & -- & --    & $+$716k \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\noindent The critical row is the Spearman $\rho$ column of the full model:
+a value above $0.5$ with $p < 0.01$ on held-out patients would confirm that
+$\boldsymbol{\mu}_q$ encodes treatment response phenotype without any
+explicit phenotype labels in the training signal.
+
+\subsection{KL Annealing Warmup}
+\label{sec:ablations:kl}
+
+\begin{table}[h]
+\centering
+\caption{Effect of $\beta$-KL warmup on posterior collapse and segmentation.}
+\label{tab:ablation_kl}
+\begin{tabular}{lccc}
+\toprule
+$E_{\text{warm}}$ (epochs) & aggDSC $\uparrow$ & Spearman $\rho$ & KL at ep.~50 \\
+\midrule
+0 (no warmup)   & -- & -- & -- \\
+5               & -- & -- & -- \\
+\textbf{10}     & -- & -- & -- \\
+20              & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}

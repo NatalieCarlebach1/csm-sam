@@ -1,15 +1,141 @@
 \section{Method}
 \label{sec:method}
 
-CSM-SAM keeps the SAM2 image encoder and mask decoder
-frozen and introduces two trainable components totalling roughly 2M
-parameters. The core module, \texttt{CrossSessionMemoryAttention}
-(see \texttt{csmsam/modeling/cross\_session\_memory\_attention.py}),
-encodes the pre-session image and mask into a memory bank of tokens and
-lets the mid-session query tokens attend to this bank through a standard
-multi-head cross-attention block, conditioned on a continuous
-weeks-elapsed embedding. A lightweight change head~\cite{fang2022snunet}
-supervised by the pre/mid mask XOR provides an auxiliary gradient that
-aligns the attention with regions of temporal change. The total loss is
-\(\mathcal{L} = \mathcal{L}_{\text{Dice}} + \mathcal{L}_{\text{CE}} +
-0.3\,\mathcal{L}_{\text{change}}\).
+\subsection{Overview}
+\label{sec:method:overview}
+
+CSM-SAM keeps the SAM2~\cite{ravi2024sam2} image encoder (ViT-H, frozen) and
+most of the mask decoder frozen and introduces three trainable components
+totalling approximately $2.7$M parameters.
+Figure~\ref{fig:architecture} gives an overview.
+
+\paragraph{Notation.}
+Let $\mathbf{F}^{\text{pre}} \in \mathbb{R}^{N \times h \times w \times C}$
+denote the SAM2 encoder features for the $N$ pre-RT slices,
+$\mathbf{F}^{\text{mid}} \in \mathbb{R}^{h \times w \times C}$ the
+current mid-RT slice features, $t \in \mathbb{R}_{>0}$ the elapsed weeks,
+and $y \in \{0,1\}^{H \times W}$ the ground-truth mid-RT mask.
+
+\subsection{Cross-Session Memory Attention}
+\label{sec:method:csma}
+
+A \texttt{CrossSessionMemoryEncoder} projects the pre-RT features into a
+compact memory bank $\mathbf{M}_{\text{pre}} \in \mathbb{R}^{N_{\text{mem}} \times C}$
+via spatial pooling and mask-guided modulation.  A
+\texttt{CrossSessionMemoryAttention} module then lets the mid-RT query tokens
+attend to $\mathbf{M}_{\text{pre}}$ through standard multi-head cross-attention:
+\begin{equation}
+  \mathbf{F}^{\text{cross}} = \mathrm{Attn}\!\left(
+    \mathbf{F}^{\text{mid}},\;
+    \mathbf{M}_{\text{pre}} + \phi(t),\;
+    \mathbf{M}_{\text{pre}}
+  \right),
+\end{equation}
+where $\phi(t)$ is a sinusoidal+MLP continuous-time embedding of weeks elapsed.
+A learned sigmoid gate blends $\mathbf{F}^{\text{cross}}$ with within-session
+memory (prior mid-RT slices) to combine cross-visit and intra-volume context.
+
+\subsection{Variational Change Latent}
+\label{sec:method:latent}
+
+The core novel contribution is a variational module that infers a
+low-dimensional latent code $\mathbf{z} \in \mathbb{R}^{d_z}$ representing the
+patient's \emph{treatment response phenotype}: a compact summary of how this
+patient's tumour changes under radiotherapy.
+
+\paragraph{Training (posterior inference).}
+At training time, both sessions are available.  A
+\texttt{ChangeLatentEncoder} computes the approximate posterior:
+\begin{equation}
+  q(\mathbf{z} \mid \mathbf{f}_{\text{pre}},\, \mathbf{f}_{\text{mid}},\, t)
+  = \mathcal{N}\!\left(\boldsymbol{\mu}_q,\, \mathrm{diag}(\boldsymbol{\sigma}_q^2)\right),
+\end{equation}
+where $\mathbf{f}_{\text{pre}} = \mathrm{GAP}(\mathbf{M}_{\text{pre}})$ and
+$\mathbf{f}_{\text{mid}} = \mathrm{GAP}(\mathbf{F}^{\text{mid}})$ are
+global-average-pooled summaries.
+The posterior mean and log-variance are computed by a three-layer MLP:
+$[\mathbf{f}_{\text{pre}},\,\mathbf{f}_{\text{mid}},\,\phi_z(t)] \to
+(\boldsymbol{\mu}_q,\, \log\boldsymbol{\sigma}_q^2)$,
+where $\phi_z$ is a separate sinusoidal temporal encoder.
+A reparameterised sample $\mathbf{z} = \boldsymbol{\mu}_q + \boldsymbol{\sigma}_q \odot \boldsymbol{\varepsilon}$,
+$\boldsymbol{\varepsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$, is used
+for all downstream computations.
+
+\paragraph{Inference (prior + retrieval).}
+At test time, the mid-RT scan has not yet been acquired.  A
+\texttt{ChangePrior} network estimates the prior distribution:
+\begin{equation}
+  p(\mathbf{z} \mid \mathbf{f}_{\text{pre}},\, t)
+  = \mathcal{N}\!\left(\boldsymbol{\mu}_p,\, \mathrm{diag}(\boldsymbol{\sigma}_p^2)\right).
+\end{equation}
+The prior is further refined by cross-patient retrieval: the top-$K$
+training patients most similar to the query (cosine similarity on
+$\mathbf{f}_{\text{pre}}$) contribute their stored posterior means
+$\{\mathbf{z}_i\}_{i=1}^K$ as an empirical estimate of the posterior:
+\begin{equation}
+  \mathbf{z}_{\text{ret}} = \sum_{i=1}^{K} w_i\, \mathbf{z}_i,
+  \qquad
+  w_i \propto \exp\!\left(\frac{\mathrm{sim}(\mathbf{f}_{\text{pre}},\, \mathbf{f}_{\text{pre}}^{(i)})}{\tau}\right),
+\end{equation}
+and the final test-time latent is the blend
+$\mathbf{z} = (1-\alpha)\,\boldsymbol{\mu}_p + \alpha\,\mathbf{z}_{\text{ret}}$
+with $\alpha = 0.5$, $\tau = 0.1$.
+
+\paragraph{FiLM conditioning.}
+The latent $\mathbf{z}$ conditions the cross-session attention query via
+Feature-wise Linear Modulation~\cite{perez2018film}:
+\begin{equation}
+  \mathbf{q}' = \mathbf{q} \odot \bigl(1 + \boldsymbol{\gamma}(\mathbf{z})\bigr)
+              + \boldsymbol{\beta}(\mathbf{z}),
+\end{equation}
+where $\boldsymbol{\gamma}, \boldsymbol{\beta} \in \mathbb{R}^C$ are produced
+by a two-layer MLP.  This makes the attention pattern \emph{change-type-aware}:
+a fast-responder $\mathbf{z}$ retrieves different memory tokens from
+$\mathbf{M}_{\text{pre}}$ than a non-responder $\mathbf{z}$.  Both heads are
+zero-initialised, so the contribution is near-zero at the start of training
+and grows as the latent space is shaped.
+
+\subsection{Auxiliary Heads}
+\label{sec:method:auxiliary}
+
+A \texttt{ChangeHead} predicts a four-class change map
+(background / stable / grown / shrunk) supervised by the signed XOR of the
+pre- and mid-RT masks.  A dual-head decoder invokes the SAM2 mask decoder
+once per structure (GTVp, GTVn), conditioned on the corresponding pre-RT mask
+as a dense prompt.
+
+\subsection{Training Objective}
+\label{sec:method:loss}
+
+\begin{equation}
+  \mathcal{L} =
+    \mathcal{L}_{\text{Dice}} + \mathcal{L}_{\text{BCE}}
+    + \lambda_c\, \mathcal{L}_{\text{change}}
+    + \beta(e)\cdot\lambda_{\text{KL}}\, \mathcal{L}_{\text{KL}},
+\end{equation}
+where $\lambda_c = 0.3$, $\lambda_{\text{KL}} = 0.1$, and
+\begin{equation}
+  \mathcal{L}_{\text{KL}} = \mathrm{KL}\!\left(
+    q(\mathbf{z} \mid \mathbf{f}_{\text{pre}},\, \mathbf{f}_{\text{mid}},\, t)
+    \;\|\;
+    p(\mathbf{z} \mid \mathbf{f}_{\text{pre}},\, t)
+  \right).
+\end{equation}
+Critically, the KL is taken against the \emph{learned prior} $p$, not a
+standard normal.  This forces $p$ to model the population-level distribution
+of treatment responses, while $q$ is regularised toward it.  The annealing
+schedule $\beta(e) = \min(1,\, e / E_{\text{warm}})$ with
+$E_{\text{warm}} = 10$ epochs prevents the KL from collapsing the posterior
+before the segmentation loss has shaped the latent space.
+
+\subsection{Emergent Phenotype Discovery}
+\label{sec:method:phenotype}
+
+No phenotype labels appear anywhere in the training signal.  The only
+supervision is the segmentation objective and the KL regulariser.  The
+claim tested in Section~\ref{sec:results:phenotype} is that $\boldsymbol{\mu}_q$
+nonetheless organises into clusters that correlate with the volume-change ratio
+$\Delta V = (\mathrm{vol}(m_{\text{mid}}) - \mathrm{vol}(m_{\text{pre}})) /
+\mathrm{vol}(m_{\text{pre}})$, a clinically meaningful indicator of treatment
+response.  This is verified post-hoc via Spearman rank correlation on held-out
+patients, not through any label in the training set.

@@ -7,6 +7,13 @@ from .retrieval import (
     compute_pre_summary,
     compute_change_template,
 )
+from .change_latent import (
+    ChangeLatentEncoder,
+    ChangePrior,
+    FiLMConditioner,
+    kl_divergence,
+    kl_beta,
+)
 
 __all__ = [
     "CrossSessionMemoryAttention",
@@ -16,4 +23,9 @@ __all__ = [
     "CrossPatientRetrieval",
     "compute_pre_summary",
     "compute_change_template",
+    "ChangeLatentEncoder",
+    "ChangePrior",
+    "FiLMConditioner",
+    "kl_divergence",
+    "kl_beta",
 ]
