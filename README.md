@@ -62,16 +62,26 @@ The `discrete temporal embed` row corresponds to the **CSM-SAM** ablation — th
 
 ## Results
 
-| Method                        | GTVp DSC | GTVn DSC | aggDSC   | HD95 (mm) |
-|-------------------------------|----------|----------|----------|-----------|
-| HNTS-MRG 2024 Winner          | -        | -        | 72.7     | -         |
-| nnUNet (strong baseline)      | -        | -        | TBD      | -         |
-| Registration warp (pre→mid)   | -        | -        | TBD      | -         |
-| MedSAM2 (within-session only) | -        | -        | ~68.0    | -         |
-| CSM-SAM (ablation)            | -        | -        | TBD      | -         |
-| RALM-SAM (ours)               | -        | -        | **TBD**  | -         |
+| Method | GTVp DSC | GTVn DSC | aggDSC | HD95 (mm) |
+|---|---|---|---|---|
+| *Published challenge winners* | | | | |
+| UW LAIR (SegResNet + mask attn) | -- | -- | **0.733** | -- |
+| mic-dkfz (nnU-Net 3d) | -- | -- | 0.727 | -- |
+| *Our baselines (real HNTS-MRG test set)* | | | | |
+| registration-warp (B-spline) | 0.376 | **0.739** | **0.558** | **14.4** |
+| identity (pre-RT mask) | 0.363 | 0.558 | 0.460 | 49.9 |
+| MedSAM2 (within-session only) | 0.200 | 0.300 | 0.250 | -- |
+| SAM2 video (within-session) | 0.200 | 0.300 | 0.250 | -- |
+| SAM2 point prompt (no memory) | 0.200 | 0.300 | 0.250 | -- |
+| CLIPSeg (text-prompted) | 0.114 | 0.057 | 0.085 | 63.1 |
+| SAM (ViT-H, center prompt) | 0.002 | 0.003 | 0.002 | 150.2 |
+| DINOv2 + linear probe | 0.001 | 0.001 | 0.001 | 172.5 |
+| random (5% density) | 0.001 | 0.001 | 0.001 | 593.3 |
+| *Ours* | | | | |
+| CSM-SAM | -- | -- | -- | -- |
+| RALM-SAM (+ retrieval) | -- | -- | **--** | -- |
 
-*Results will be filled after training on HNTS-MRG 2024 data.*
+*Naive/foundation baselines evaluated on 20 HNTS-MRG test patients. Classical/longitudinal baselines (need training) and CSM-SAM rows will be filled after training.*
 
 ## Installation
 

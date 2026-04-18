@@ -53,7 +53,7 @@ class CLIPSegBaseline:
     prompts and threshold — this is the best-faith zero-shot application
     of a text-conditioned foundation model to this task.
 
-    Falls back to random predictions if transformers/CLIPSeg unavailable.
+    Raises RuntimeError if transformers/CLIPSeg is unavailable.
     """
 
     def __init__(
@@ -64,28 +64,30 @@ class CLIPSegBaseline:
     ):
         self.device = device
         self.prompts = list(prompts)
-        self.model = None
-        self.processor = None
 
         try:
             from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
+        except ImportError as e:
+            raise RuntimeError(
+                f"CLIPSeg failed to import (transformers not installed): {e}\n"
+                f"Install: pip install transformers pillow"
+            ) from e
+
+        try:
             self.processor = CLIPSegProcessor.from_pretrained(model_id)
             self.model = CLIPSegForImageSegmentation.from_pretrained(model_id).to(device).eval()
             print(f"CLIPSeg ({model_id}) loaded successfully.")
-        except ImportError:
-            print("Warning: transformers not installed. Using random fallback.")
-            print("Install with: pip install transformers pillow")
         except Exception as e:
-            print(f"Warning: CLIPSeg load failed ({e}). Using random fallback.")
+            raise RuntimeError(
+                f"CLIPSeg model failed to load: {e}\n"
+                f"Model ID: {model_id}"
+            ) from e
 
     @torch.no_grad()
     def predict_volume(self, mid_images: torch.Tensor, threshold: float = 0.5) -> np.ndarray:
         from PIL import Image  # local import; guarded by fallback below
 
         N, _, H, W = mid_images.shape
-
-        if self.model is None or self.processor is None:
-            return (np.random.rand(N, H, W) > 0.85).astype(np.float32)
 
         pred_slices = []
         for i in range(N):

@@ -39,23 +39,29 @@ class MedSAM2Baseline:
       3. Decode mask
       NO cross-session (pre-RT) information used.
 
-    If MedSAM2 is not installed, falls back to random predictions (for testing).
+    Raises RuntimeError if SAM2 is not installed or checkpoint fails to load.
     """
 
     def __init__(self, sam2_checkpoint: str, device: str = "cuda"):
         self.device = device
-        self.sam2 = None
 
         try:
             from sam2.build_sam import build_sam2
-            self.sam2 = build_sam2("sam2_hiera_large", sam2_checkpoint, device=device)
+        except ImportError as e:
+            raise RuntimeError(
+                f"SAM2 failed to import: {e}\n"
+                f"Install: git clone https://github.com/facebookresearch/sam2 && pip install -e sam2/"
+            ) from e
+
+        try:
+            self.sam2 = build_sam2("configs/sam2.1/sam2.1_hiera_l", sam2_checkpoint, device=device)
             self.sam2.eval()
             print("MedSAM2 loaded successfully.")
-        except ImportError:
-            print("Warning: SAM2 not installed. Using random prediction fallback.")
-            print("Install with: git clone https://github.com/facebookresearch/sam2 && pip install -e sam2/")
         except Exception as e:
-            print(f"Warning: SAM2 build failed ({type(e).__name__}: {e}). Using random prediction fallback.")
+            raise RuntimeError(
+                f"MedSAM2 (SAM2) checkpoint failed to load: {e}\n"
+                f"Download: see https://github.com/facebookresearch/sam2#download-checkpoints"
+            ) from e
 
     @torch.no_grad()
     def predict_volume(
@@ -73,11 +79,6 @@ class MedSAM2Baseline:
             pred_binary : (N, H, W) binary prediction
         """
         N, _, H, W = mid_images.shape
-
-        if self.sam2 is None:
-            # Fallback: simple thresholded Gaussian (for testing pipeline only)
-            pred = np.random.rand(N, H, W) > 0.8
-            return pred.astype(np.float32)
 
         # Use SAM2 predictor with within-session memory
         pred_slices = []

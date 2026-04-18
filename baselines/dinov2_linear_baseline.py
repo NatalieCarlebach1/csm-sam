@@ -47,7 +47,7 @@ class DINOv2LinearBaseline:
 
     In this baseline we use the decoder UNTRAINED (zero-init) as a pure
     "foundation-model prior" readout; swapping in a trained linear probe is a
-    one-line extension. Falls back to random if torch.hub model unavailable.
+    one-line extension. Raises RuntimeError if torch.hub model is unavailable.
     """
 
     def __init__(
@@ -60,8 +60,6 @@ class DINOv2LinearBaseline:
         self.device = device
         self.patch_size = patch_size
         self.feat_dim = feat_dim
-        self.encoder = None
-        self.decoder = None
 
         try:
             self.encoder = torch.hub.load("facebookresearch/dinov2", model_name, trust_repo=True)
@@ -74,14 +72,15 @@ class DINOv2LinearBaseline:
             self.decoder.eval()
             print(f"DINOv2 ({model_name}) loaded successfully.")
         except Exception as e:
-            print(f"Warning: DINOv2 load failed ({e}). Using random fallback.")
+            raise RuntimeError(
+                f"DINOv2 failed to load: {e}\n"
+                f"Install: pip install torch torchvision\n"
+                f"Model loaded via: torch.hub.load('facebookresearch/dinov2', '{model_name}')"
+            ) from e
 
     @torch.no_grad()
     def predict_volume(self, mid_images: torch.Tensor, threshold: float = 0.5) -> np.ndarray:
         N, _, H, W = mid_images.shape
-
-        if self.encoder is None or self.decoder is None:
-            return (np.random.rand(N, H, W) > 0.85).astype(np.float32)
 
         # DINOv2 requires input sizes divisible by patch_size
         Hn = (H // self.patch_size) * self.patch_size

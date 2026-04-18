@@ -48,7 +48,7 @@ class SAMVanillaBaseline:
     No memory, no finetuning — this establishes the floor for a frozen
     general-purpose foundation model on HNTS-MRG.
 
-    Falls back to random predictions if `segment_anything` is missing.
+    Raises RuntimeError if `segment_anything` is missing or checkpoint fails to load.
     """
 
     def __init__(
@@ -60,20 +60,26 @@ class SAMVanillaBaseline:
     ):
         self.device = device
         self.prompt_mode = prompt_mode
-        self.predictor = None
 
         try:
             from segment_anything import sam_model_registry, SamPredictor
+        except ImportError as e:
+            raise RuntimeError(
+                f"SAM (segment_anything) failed to import: {e}\n"
+                f"Install: pip install segment-anything"
+            ) from e
+
+        try:
             sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
             sam.to(device)
             sam.eval()
             self.predictor = SamPredictor(sam)
             print(f"SAM ({model_type}) loaded successfully.")
-        except ImportError:
-            print("Warning: segment_anything not installed. Using random fallback.")
-            print("Install with: pip install segment-anything")
         except Exception as e:
-            print(f"Warning: failed to load SAM checkpoint ({e}). Using random fallback.")
+            raise RuntimeError(
+                f"SAM checkpoint failed to load: {e}\n"
+                f"Download: wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
+            ) from e
 
     def _build_points(self, H: int, W: int) -> tuple[np.ndarray, np.ndarray]:
         if self.prompt_mode == "grid":
@@ -88,9 +94,6 @@ class SAMVanillaBaseline:
     @torch.no_grad()
     def predict_volume(self, mid_images: torch.Tensor, threshold: float = 0.5) -> np.ndarray:
         N, _, H, W = mid_images.shape
-
-        if self.predictor is None:
-            return (np.random.rand(N, H, W) > 0.85).astype(np.float32)
 
         pred_slices = []
         for i in range(N):

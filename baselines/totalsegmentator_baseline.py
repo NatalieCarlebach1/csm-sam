@@ -49,7 +49,7 @@ class TotalSegmentatorBaseline:
     H&N-relevant soft-tissue labels, which is intentionally weak — this is the
     point: a generalist model over-segments anatomy and under-segments tumor.
 
-    Falls back to random predictions if `totalsegmentator` is missing.
+    Raises RuntimeError if `totalsegmentator` is not installed.
     """
 
     # Labels that plausibly overlap with HNC GTV regions in MR_total / head_neck tasks.
@@ -64,15 +64,15 @@ class TotalSegmentatorBaseline:
     def __init__(self, task: str = "head_neck_muscles", device: str = "cuda"):
         self.device = device
         self.task = task
-        self.available = False
 
         try:
             import totalsegmentator  # noqa: F401
-            self.available = True
             print("TotalSegmentator available.")
-        except ImportError:
-            print("Warning: totalsegmentator not installed. Using random fallback.")
-            print("Install with: pip install totalsegmentator")
+        except ImportError as e:
+            raise RuntimeError(
+                f"TotalSegmentator failed to import: {e}\n"
+                f"Install: pip install totalsegmentator"
+            ) from e
 
     def _run_cli(self, nifti_in: Path, seg_dir: Path) -> bool:
         try:
@@ -90,9 +90,6 @@ class TotalSegmentatorBaseline:
             return False
 
     def predict_from_nifti(self, nifti_path: str, H: int, W: int, N: int) -> np.ndarray:
-        if not self.available:
-            return (np.random.rand(N, H, W) > 0.9).astype(np.float32)
-
         try:
             import nibabel as nib
             with tempfile.TemporaryDirectory() as tmp:
@@ -122,8 +119,10 @@ class TotalSegmentatorBaseline:
         N, _, H, W = mid_images.shape
         if mid_nifti_path and Path(mid_nifti_path).exists():
             return self.predict_from_nifti(mid_nifti_path, H, W, N)
-        # No NIfTI path provided — random fallback for pipeline testing only.
-        return (np.random.rand(N, H, W) > 0.9).astype(np.float32)
+        raise RuntimeError(
+            "TotalSegmentator requires a NIfTI file path. "
+            "No valid mid_nifti_path was provided or the file does not exist."
+        )
 
 
 def run_totalsegmentator_baseline(

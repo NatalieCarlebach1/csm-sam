@@ -46,34 +46,37 @@ class SAM2VideoBaseline:
       - Use SAM2's video predictor to propagate the mask forward and backward.
       - No pre-RT signal is used.
 
-    Falls back to random predictions if sam2 / video predictor is missing.
+    Raises RuntimeError if sam2 / video predictor is missing or fails to load.
     """
 
     def __init__(
         self,
         sam2_checkpoint: str,
-        model_cfg: str = "sam2_hiera_large",
+        model_cfg: str = "configs/sam2.1/sam2.1_hiera_l",
         device: str = "cuda",
     ):
         self.device = device
-        self.video_predictor = None
 
         try:
             from sam2.build_sam import build_sam2_video_predictor
+        except ImportError as e:
+            raise RuntimeError(
+                f"SAM2 failed to import: {e}\n"
+                f"Install: git clone https://github.com/facebookresearch/sam2 && pip install -e sam2/"
+            ) from e
+
+        try:
             self.video_predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint, device=device)
             print("SAM2 video predictor loaded successfully.")
-        except ImportError:
-            print("Warning: SAM2 not installed. Using random fallback.")
-            print("Install with: git clone https://github.com/facebookresearch/sam2 && pip install -e sam2/")
         except Exception as e:
-            print(f"Warning: SAM2 video predictor load failed ({e}). Using random fallback.")
+            raise RuntimeError(
+                f"SAM2 video predictor failed to load: {e}\n"
+                f"Download: see https://github.com/facebookresearch/sam2#download-checkpoints"
+            ) from e
 
     @torch.no_grad()
     def predict_volume(self, mid_images: torch.Tensor, threshold: float = 0.5) -> np.ndarray:
         N, _, H, W = mid_images.shape
-
-        if self.video_predictor is None:
-            return (np.random.rand(N, H, W) > 0.85).astype(np.float32)
 
         try:
             # init state expects a tensor video
@@ -124,7 +127,7 @@ def run_sam2_video_baseline(
     device: str = "cuda",
     threshold: float = 0.5,
     image_size: int = 1024,
-    model_cfg: str = "sam2_hiera_large",
+    model_cfg: str = "configs/sam2.1/sam2.1_hiera_l",
 ):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -190,7 +193,7 @@ if __name__ == "__main__":
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--image_size", type=int, default=1024)
-    parser.add_argument("--model_cfg", type=str, default="sam2_hiera_large")
+    parser.add_argument("--model_cfg", type=str, default="configs/sam2.1/sam2.1_hiera_l")
     args = parser.parse_args()
 
     if args.device == "cuda" and not torch.cuda.is_available():
