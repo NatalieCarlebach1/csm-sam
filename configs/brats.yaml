@@ -1,0 +1,87 @@
+# CSM-SAM BraTS-GLI 2024 Training Configuration
+# Longitudinal post-treatment glioma — single binary tumor mask (no dual GTVp/GTVn).
+# Run: torchrun --nproc_per_node=8 train_brats.py --config configs/brats.yaml
+
+data:
+  data_dir: "data/raw/BraTS_GLI"
+  image_size: 1024
+  batch_size: 4
+  num_workers: 4
+  pin_memory: true
+  tumor_ratio: 0.7
+  modality: "t2f"                       # t1c | t1n | t2f | t2w | all
+  val_fraction: 0.10
+
+model:
+  sam2_checkpoint: "checkpoints/sam2/sam2.1_hiera_large.pt"
+  sam2_cfg: "sam2_hiera_large"
+  d_model: 256
+  num_heads: 8
+  n_memory_frames: 8
+  spatial_pool_size: 16
+  max_weeks: 52                          # BraTS follow-up can be up to ~12 months
+  dropout: 0.0
+  temporal_encoder_type: "continuous"
+  temporal_hidden_dim: 128
+  temporal_n_frequencies: 6
+
+training:
+  epochs: 200
+  lr: 1e-4
+  lr_decoder: 1e-5
+  weight_decay: 0.01
+  warmup_epochs: 10
+  scheduler: "cosine"
+  gradient_clip_norm: 1.0
+  amp: true
+  accumulate_grad_batches: 4
+  sequence_length: 4
+  sequence_mode: true
+
+loss:
+  lambda_dice: 1.0
+  lambda_bce: 1.0
+  lambda_change: 0.3
+  change_class_weights: [0.1, 1.0, 2.0, 2.0]
+  lambda_consistency: 0.2
+  consistency_fg: 1.0
+  consistency_bg: 0.1
+
+change_latent:
+  enabled: true
+  d_z: 64
+  lambda_kl: 0.1
+  kl_warmup_epochs: 10
+  alpha: 0.5
+  retrieval_tau: 0.1
+
+retrieval:
+  enabled: true
+  k: 5
+  n_tokens: 16
+  gate_init: 0.0
+  bank_path: null
+
+evaluation:
+  val_every_n_epochs: 5
+  primary_metric: "dsc"                 # single-structure DSC (no aggDSC)
+  threshold: 0.5
+  voxel_spacing: [1.0, 1.0, 1.0]       # BraTS is 1mm isotropic
+
+checkpoint:
+  output_dir: "checkpoints/csmsam_brats"
+  save_every_n_epochs: 10
+  keep_last_n: 3
+  save_best: true
+
+logging:
+  use_wandb: false
+  wandb_project: "csm-sam-brats"
+  wandb_entity: null
+  log_every_n_steps: 20
+  log_images_every_n_epochs: 20
+
+hardware:
+  device: "cuda"
+  num_gpus: 8
+  seed: 42
