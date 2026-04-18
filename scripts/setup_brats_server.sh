@@ -1,6 +1,6 @@
 #!/bin/bash
 # One-shot setup + launch script for TAU rack-wolf-g01
-# All conda/pip/data goes to /media/data1/talshah to avoid home disk full.
+# All conda/pip/data goes to /media/data1/natalie to avoid home disk full.
 #
 # Run from the repo root:
 #   bash scripts/setup_brats_server.sh
@@ -11,7 +11,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
 # ── All heavy I/O redirected to data1 ─────────────────────────────────────
-DATA_ROOT="/media/data1/talshah"
+DATA_ROOT="/media/data1/natalie"
 CONDA_ENVS="$DATA_ROOT/conda/envs"
 CONDA_PKGS="$DATA_ROOT/conda/pkgs"
 PIP_CACHE="$DATA_ROOT/pip_cache"
