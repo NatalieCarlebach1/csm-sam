@@ -222,6 +222,28 @@ def siamese_unet_baseline(data_dir, image_size, device, **_):
     return {"dsc_mean": float(np.mean(dsc_list)), "dsc_std": float(np.std(dsc_list))}
 
 
+def nnunet_brats_baseline(data_dir, image_size, device, output_dir, **_):
+    """nnUNet 3d_fullres trained on BraTS-GLI mid-RT (4 modalities)."""
+    from baselines.nnunet_brats_baseline import (
+        _check_nnunet, HAS_SITK,
+        convert_to_nnunet_format, run_nnunet_training,
+        run_nnunet_inference, evaluate_predictions,
+        _emit_fallback,
+    )
+    nnunet_dir = Path(data_dir).parent / "nnunet_brats"
+    out = Path(output_dir) / "nnunet_brats"
+    if not _check_nnunet() or not HAS_SITK:
+        _emit_fallback(Path(data_dir), out)
+        metrics_path = out / "metrics.json"
+        with open(metrics_path) as f:
+            d = json.load(f)
+        return d.get("aggregate", {"dsc_mean": 0.0, "dsc_std": 0.0})
+    convert_to_nnunet_format(Path(data_dir), nnunet_dir)
+    run_nnunet_training(nnunet_dir)
+    preds = run_nnunet_inference(nnunet_dir, Path(data_dir), out)
+    return evaluate_predictions(preds, Path(data_dir), out)
+
+
 def medsam2_baseline(data_dir, image_size, device, sam2_checkpoint, **_):
     """SAM2 with within-session memory only (no cross-session)."""
     try:
@@ -318,6 +340,7 @@ BASELINES = {
     "concat_channels":   concat_channels_baseline,
     "siamese_unet":      siamese_unet_baseline,
     "medsam2":           medsam2_baseline,
+    "nnunet_brats":      nnunet_brats_baseline,
 }
 
 
@@ -348,6 +371,7 @@ def main():
         image_size=args.image_size,
         device=args.device,
         sam2_checkpoint=args.sam2_checkpoint,
+        output_dir=args.output_dir,
     )
 
     all_results = {}
