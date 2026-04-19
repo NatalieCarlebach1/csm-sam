@@ -576,9 +576,11 @@ def main():
             print(f"  {name}: {count:,}")
 
     if world_size > 1:
+        torch.cuda.empty_cache()
         model = nn.parallel.DistributedDataParallel(
             model, device_ids=[local_rank], output_device=local_rank,
             find_unused_parameters=True,
+            bucket_cap_mb=25,
         )
 
     if is_main(rank):
