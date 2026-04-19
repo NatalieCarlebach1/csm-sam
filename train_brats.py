@@ -577,12 +577,15 @@ def main():
 
     if world_size > 1:
         torch.cuda.empty_cache()
+        # Skip NCCL param-shape verification — it OOMs on large SAM2 model
+        _orig_verify = dist._verify_params_across_processes
+        dist._verify_params_across_processes = lambda *a, **kw: None
         model = nn.parallel.DistributedDataParallel(
             model, device_ids=[local_rank], output_device=local_rank,
-            find_unused_parameters=False,
-            static_graph=True,
+            find_unused_parameters=True,
             bucket_cap_mb=25,
         )
+        dist._verify_params_across_processes = _orig_verify
 
     if is_main(rank):
         print("\nBuilding BraTS-GLI data loaders...")
