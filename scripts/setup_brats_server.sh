@@ -26,6 +26,9 @@ mkdir -p "$CONDA_ENVS" "$CONDA_PKGS" "$PIP_CACHE" "$TMPDIR" \
 export TMPDIR
 export PIP_CACHE_DIR="$PIP_CACHE"
 export CONDA_PKGS_DIRS="$CONDA_PKGS"
+export HF_HOME="$DATA_ROOT/hf_cache"
+export HF_DATASETS_CACHE="$DATA_ROOT/hf_cache/datasets"
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE"
 
 echo "============================================================"
 echo " CSM-SAM BraTS-GLI Setup — TAU rack-wolf-g01"
