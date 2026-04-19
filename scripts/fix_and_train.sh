@@ -6,8 +6,10 @@ set -e
 
 DATA_ROOT="/media/data1/natalie"
 export TMPDIR="$DATA_ROOT/tmp"
+export MPLCONFIGDIR="$DATA_ROOT/tmp/matplotlib"
+export PIP_CACHE_DIR="$DATA_ROOT/pip_cache"
 export CUDA_VISIBLE_DEVICES=4,5,6,7
-mkdir -p "$TMPDIR"
+mkdir -p "$TMPDIR" "$MPLCONFIGDIR"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$DATA_ROOT/conda/envs/csmsam"
@@ -27,7 +29,7 @@ echo "  SAM2 installed from source OK"
 echo "[2/2] Launching training on GPUs 4-7..."
 LOG="$DATA_ROOT/train.log"
 
-nohup torchrun \
+nohup env TMPDIR="$DATA_ROOT/tmp" MPLCONFIGDIR="$DATA_ROOT/tmp/matplotlib" torchrun \
     --nproc_per_node=4 \
     --master_port=29500 \
     train_brats.py \
