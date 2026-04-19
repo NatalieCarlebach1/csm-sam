@@ -23,6 +23,7 @@ import json
 import os
 import random
 import time
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -682,4 +683,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        rank = int(os.environ.get("RANK", 0))
+        log_path = f"/home/tal/natalie/tmp/rank_{rank}_error.log"
+        with open(log_path, "w") as f:
+            traceback.print_exc(file=f)
+        traceback.print_exc()
+        raise
