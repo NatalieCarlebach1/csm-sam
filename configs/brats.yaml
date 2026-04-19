@@ -5,8 +5,8 @@
 data:
   data_dir: "data/raw/BraTS_GLI"
   image_size: 1024
-  batch_size: 4
-  num_workers: 4
+  batch_size: 2
+  num_workers: 3
   pin_memory: true
   tumor_ratio: 0.7
   modality: "t2f"                       # t1c | t1n | t2f | t2w | all
