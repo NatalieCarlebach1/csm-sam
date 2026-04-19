@@ -579,7 +579,8 @@ def main():
         torch.cuda.empty_cache()
         model = nn.parallel.DistributedDataParallel(
             model, device_ids=[local_rank], output_device=local_rank,
-            find_unused_parameters=True,
+            find_unused_parameters=False,
+            static_graph=True,
             bucket_cap_mb=25,
         )
 
