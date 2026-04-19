@@ -4,7 +4,7 @@
 
 data:
   data_dir: "data/raw/BraTS_GLI"
-  image_size: 768
+  image_size: 512
   batch_size: 2
   num_workers: 3
   pin_memory: true
