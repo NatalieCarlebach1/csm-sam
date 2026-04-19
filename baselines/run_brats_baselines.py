@@ -228,27 +228,24 @@ def nnunet_brats_baseline(data_dir, image_size, device, output_dir, **_):
         _check_nnunet, HAS_SITK,
         convert_to_nnunet_format, run_nnunet_training,
         run_nnunet_inference, evaluate_predictions,
-        _emit_fallback,
     )
-    nnunet_dir = Path(data_dir).parent / "nnunet_brats"
-    out = Path(output_dir) / "nnunet_brats"
+    # Use a dedicated work dir — _run_baseline owns output_dir/nnunet_brats/metrics.json
+    work_dir   = Path(data_dir).parent / "nnunet_brats_work"
+    nnunet_dir = Path(data_dir).parent / "nnunet_brats_raw"
     if not _check_nnunet() or not HAS_SITK:
-        _emit_fallback(Path(data_dir), out)
-        metrics_path = out / "metrics.json"
-        with open(metrics_path) as f:
-            d = json.load(f)
-        return d.get("aggregate", {"dsc_mean": 0.0, "dsc_std": 0.0})
+        return {"dsc_mean": 0.0, "dsc_std": 0.0,
+                "error": "nnunetv2 or SimpleITK not installed"}
     convert_to_nnunet_format(Path(data_dir), nnunet_dir)
     run_nnunet_training(nnunet_dir)
-    preds = run_nnunet_inference(nnunet_dir, Path(data_dir), out)
-    return evaluate_predictions(preds, Path(data_dir), out)
+    preds = run_nnunet_inference(nnunet_dir, Path(data_dir), work_dir)
+    return evaluate_predictions(preds, Path(data_dir), work_dir)
 
 
 def medsam2_baseline(data_dir, image_size, device, sam2_checkpoint, **_):
     """SAM2 with within-session memory only (no cross-session)."""
     try:
         from sam2.build_sam import build_sam2
-        sam2 = build_sam2("sam2_hiera_large", sam2_checkpoint, device=device)
+        sam2 = build_sam2("sam2.1/sam2.1_hiera_l", sam2_checkpoint, device=device)
         sam2.eval()
         has_sam2 = True
     except Exception as e:

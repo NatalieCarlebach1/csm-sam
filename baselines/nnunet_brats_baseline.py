@@ -223,7 +223,10 @@ def run_nnunet_inference(nnunet_raw_dir: Path, data_dir: Path,
 
 
 def evaluate_predictions(predictions_dir: Path, data_dir: Path,
-                          output_dir: Path) -> dict:
+                          work_dir: Path) -> dict:
+    """Returns flat metrics dict {dsc_mean, dsc_std, n_patients}.
+    Saves per-patient detail to work_dir for inspection; the sweep's
+    _run_baseline/  _save writes the canonical metrics.json."""
     from csmsam.utils.metrics import compute_dice
 
     training_dir = data_dir / "Training"
@@ -258,10 +261,11 @@ def evaluate_predictions(predictions_dir: Path, data_dir: Path,
         "dsc_std":  float(np.std(dsc_list))  if dsc_list else 0.0,
         "n_patients": len(dsc_list),
     }
-    result = {"aggregate": metrics, "per_patient": per_patient, "fallback": False}
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with open(output_dir / "metrics.json", "w") as f:
-        json.dump(result, f, indent=2)
+    # Save per-patient detail to work dir (for debugging); canonical metrics.json
+    # is written by the sweep's _run_baseline → _save.
+    work_dir.mkdir(parents=True, exist_ok=True)
+    with open(work_dir / "per_patient.json", "w") as f:
+        json.dump(per_patient, f, indent=2)
     return metrics
 
 
