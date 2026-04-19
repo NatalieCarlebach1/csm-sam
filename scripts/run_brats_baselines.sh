@@ -24,6 +24,11 @@ IMAGE_SIZE="${IMAGE_SIZE:-512}"
 # GPUs 0-3 reserved for baselines; GPUs 4-7 for training
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
+# Redirect matplotlib/fontconfig cache away from full home disk
+export MPLCONFIGDIR="$DATA_ROOT/tmp/matplotlib"
+export FONTCONFIG_PATH="/etc/fonts"
+mkdir -p "$MPLCONFIGDIR"
+
 # Activate the csmsam conda env
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$DATA_ROOT/conda/envs/csmsam"
