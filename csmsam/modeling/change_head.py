@@ -140,4 +140,5 @@ class ChangeMapLoss(nn.Module):
         Returns:
             loss : scalar
         """
-        return F.cross_entropy(logits, change_labels, weight=self.weight)
+        weight = self.weight.to(logits.device) if self.weight is not None else None
+        return F.cross_entropy(logits, change_labels, weight=weight)
