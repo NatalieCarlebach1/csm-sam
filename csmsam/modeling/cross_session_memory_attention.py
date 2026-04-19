@@ -357,8 +357,7 @@ class CrossSessionMemoryAttention(nn.Module):
         # ------------------------------------------------------------------
         gate_vals = self.gate(
             torch.cat([cross_context, within_context], dim=-1)
-        )  # (B, HW, C) — note: gate is per-channel, not scalar
-        # Clamp gate to avoid extreme values during early training
+        ).clamp(0.0, 1.0)  # (B, HW, C) — clamp for AMP numerical safety
         fused = gate_vals * cross_context + (1.0 - gate_vals) * within_context
 
         # ------------------------------------------------------------------
