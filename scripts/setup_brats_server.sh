@@ -64,13 +64,16 @@ assert torch.cuda.is_available(), 'CUDA not available!'
 print(f'  torch {torch.__version__}, CUDA {torch.version.cuda}, GPUs: {torch.cuda.device_count()}')
 "
 
-# ── 3. SAM2 ───────────────────────────────────────────────────────────────
-echo "[3/6] Installing SAM2"
-if python -c "import sam2" 2>/dev/null; then
+# ── 3. SAM2 (must install from source so config files are available) ──────
+echo "[3/6] Installing SAM2 from source"
+SAM2_SRC="$DATA_ROOT/sam2_src"
+if python -c "from sam2.build_sam import build_sam2" 2>/dev/null; then
     echo "  SAM2 already installed"
 else
-    pip install --quiet --cache-dir "$PIP_CACHE" \
-        "git+https://github.com/facebookresearch/sam2.git"
+    if [ ! -d "$SAM2_SRC" ]; then
+        git clone https://github.com/facebookresearch/sam2.git "$SAM2_SRC"
+    fi
+    pip install --quiet --cache-dir "$PIP_CACHE" -e "$SAM2_SRC"
 fi
 
 # ── 4. Project dependencies ───────────────────────────────────────────────
