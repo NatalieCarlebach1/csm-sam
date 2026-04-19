@@ -620,6 +620,7 @@ def main():
         print(f"Effective batch size: {eff_bs}  ({world_size} GPU × {cfg.data.batch_size} × {cfg.training.accumulate_grad_batches} accum)")
         print()
 
+    torch.autograd.set_detect_anomaly(True)
     metrics_history = []
 
     for epoch in range(start_epoch, cfg.training.epochs + 1):

@@ -83,5 +83,5 @@ logging:
 
 hardware:
   device: "cuda"
-  num_gpus: 8
+  num_gpus: 3
   seed: 42
