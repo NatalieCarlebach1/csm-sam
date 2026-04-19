@@ -4,7 +4,7 @@
 # Within-session only (no cross-session memory)
 medsam2:
   sam2_checkpoint: "checkpoints/sam2/sam2.1_hiera_large.pt"
-  sam2_cfg: "sam2.1/sam2.1_hiera_large"
+  sam2_cfg: "sam2.1_hiera_l"
   batch_size: 4
   image_size: 1024
 

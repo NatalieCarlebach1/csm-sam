@@ -14,7 +14,7 @@ data:
 
 model:
   sam2_checkpoint: "checkpoints/sam2/sam2.1_hiera_large.pt"
-  sam2_cfg: "sam2.1/sam2.1_hiera_large"
+  sam2_cfg: "sam2.1_hiera_l"
   d_model: 256
   num_heads: 8
   n_memory_frames: 8

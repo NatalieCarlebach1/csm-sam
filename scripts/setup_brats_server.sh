@@ -73,8 +73,15 @@ else
     if [ ! -d "$SAM2_SRC" ]; then
         git clone https://github.com/facebookresearch/sam2.git "$SAM2_SRC"
     fi
-    pip install --quiet --cache-dir "$PIP_CACHE" -e "$SAM2_SRC"
+    pip install --quiet --cache-dir "$PIP_CACHE" --no-build-isolation -e "$SAM2_SRC"
 fi
+
+# SAM2.1 config must be in sam2 package root for Hydra to find it via pkg://sam2
+SAM2_PKG="$SAM2_SRC/sam2"
+cp "$SAM2_PKG/configs/sam2.1/sam2.1_hiera_l.yaml"  "$SAM2_PKG/sam2.1_hiera_l.yaml"
+cp "$SAM2_PKG/configs/sam2.1/sam2.1_hiera_s.yaml"  "$SAM2_PKG/sam2.1_hiera_s.yaml"
+cp "$SAM2_PKG/configs/sam2.1/sam2.1_hiera_b+.yaml" "$SAM2_PKG/sam2.1_hiera_b+.yaml"
+echo "  SAM2.1 configs copied to package root"
 
 # ── 4. Project dependencies ───────────────────────────────────────────────
 echo "[4/6] Installing project dependencies"

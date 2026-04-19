@@ -245,7 +245,7 @@ def medsam2_baseline(data_dir, image_size, device, sam2_checkpoint, **_):
     """SAM2 with within-session memory only (no cross-session)."""
     try:
         from sam2.build_sam import build_sam2
-        sam2 = build_sam2("sam2.1/sam2.1_hiera_l", sam2_checkpoint, device=device)
+        sam2 = build_sam2("sam2.1_hiera_l", sam2_checkpoint, device=device)
         sam2.eval()
         has_sam2 = True
     except Exception as e:

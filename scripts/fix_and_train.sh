@@ -18,7 +18,9 @@ SAM2_SRC="$DATA_ROOT/sam2_src"
 if [ ! -d "$SAM2_SRC" ]; then
     git clone https://github.com/facebookresearch/sam2.git "$SAM2_SRC"
 fi
-pip install -q --cache-dir "$DATA_ROOT/pip_cache" -e "$SAM2_SRC"
+pip install -q --cache-dir "$DATA_ROOT/pip_cache" --no-build-isolation -e "$SAM2_SRC"
+# Copy SAM2.1 configs to package root so Hydra finds them via pkg://sam2
+cp "$SAM2_SRC/sam2/configs/sam2.1/sam2.1_hiera_l.yaml" "$SAM2_SRC/sam2/sam2.1_hiera_l.yaml"
 echo "  SAM2 installed from source OK"
 
 # ── Launch training ───────────────────────────────────────────────────────
