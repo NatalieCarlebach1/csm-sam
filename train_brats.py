@@ -18,6 +18,7 @@ Multi-GPU (8 GPUs):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import random
@@ -186,9 +187,12 @@ def train_one_epoch(model, loader, optimizer, scheduler, loss_fn,
             )
             loss = losses["total"] / accum
 
-        scaler.scale(loss).backward()
+        is_sync_step = (step + 1) % accum == 0
+        sync_ctx = contextlib.nullcontext() if (is_sync_step or not isinstance(model, nn.parallel.DistributedDataParallel)) else model.no_sync()
+        with sync_ctx:
+            scaler.scale(loss).backward()
 
-        if (step + 1) % accum == 0:
+        if is_sync_step:
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(
                 [p for g in optimizer.param_groups for p in g["params"]],
@@ -306,9 +310,12 @@ def train_sequence_epoch(model, volume_loader, optimizer, scheduler, loss_fn,
             seq_loss = seq_loss / max(n_in_seq, 1)
             loss = seq_loss / accum
 
-        scaler.scale(loss).backward()
+        is_sync_step = (step + 1) % accum == 0
+        sync_ctx = contextlib.nullcontext() if (is_sync_step or not isinstance(model, nn.parallel.DistributedDataParallel)) else model.no_sync()
+        with sync_ctx:
+            scaler.scale(loss).backward()
 
-        if (step + 1) % accum == 0:
+        if is_sync_step:
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(
                 [p for g in optimizer.param_groups for p in g["params"]],
