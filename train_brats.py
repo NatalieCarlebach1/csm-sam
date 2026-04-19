@@ -261,59 +261,59 @@ def train_sequence_epoch(model, volume_loader, optimizer, scheduler, loss_fn,
             start = random.randint(0, max(0, N - S))
         window = slice(start, start + S)
 
-        with autocast(enabled=cfg.training.amp):
-            M_pre = unwrap(model).encode_pre_rt(
-                pre_images.unsqueeze(0), pre_masks.unsqueeze(0)
-            )
-            unwrap(model).reset_mid_session_memory()
-
-            seq_loss = None
-            seq_comps = {"dice": 0.0, "bce": 0.0, "change": 0.0, "kl": 0.0}
-            n_in_seq = 0
-
-            for i in range(window.start, window.stop):
-                weeks_t = torch.tensor([weeks_scalar], dtype=torch.long, device=device)
-                pm = pre_masks[i].unsqueeze(0)
-                mm = mid_masks[i].unsqueeze(0)
-
-                out = model(
-                    mid_images=mid_images[i].unsqueeze(0),
-                    M_pre=M_pre,
-                    pre_images=pre_images[i].unsqueeze(0),
-                    weeks_elapsed=weeks_t,
-                    pre_gtvp_mask=pm,
-                    pre_gtvn_mask=pm,   # same mask for both heads
-                    return_change_map=True,
-                    detach_memory=False,
-                    training_mode=True,
-                )
-
-                target = _dual_target(mm)
-                kl = out.get("kl_loss")
-                losses = loss_fn(
-                    pred_masks=out["masks"],
-                    target_masks=target,
-                    change_logits=out.get("change_map"),
-                    pre_masks=pm,
-                    mid_masks=mm,
-                    kl_loss=kl,
-                    kl_beta=kl_beta_val,
-                )
-
-                step_loss = losses["total"]
-                seq_loss = step_loss if seq_loss is None else seq_loss + step_loss
-                for k in seq_comps:
-                    v = losses.get(k, None)
-                    if v is not None:
-                        seq_comps[k] += v.item() if torch.is_tensor(v) else float(v)
-                n_in_seq += 1
-
-            seq_loss = seq_loss / max(n_in_seq, 1)
-            loss = seq_loss / accum
-
         is_sync_step = (step + 1) % accum == 0
         sync_ctx = contextlib.nullcontext() if (is_sync_step or not isinstance(model, nn.parallel.DistributedDataParallel)) else model.no_sync()
         with sync_ctx:
+            with autocast(enabled=cfg.training.amp):
+                M_pre = unwrap(model).encode_pre_rt(
+                    pre_images.unsqueeze(0), pre_masks.unsqueeze(0)
+                )
+                unwrap(model).reset_mid_session_memory()
+
+                seq_loss = None
+                seq_comps = {"dice": 0.0, "bce": 0.0, "change": 0.0, "kl": 0.0}
+                n_in_seq = 0
+
+                for i in range(window.start, window.stop):
+                    weeks_t = torch.tensor([weeks_scalar], dtype=torch.long, device=device)
+                    pm = pre_masks[i].unsqueeze(0)
+                    mm = mid_masks[i].unsqueeze(0)
+
+                    out = model(
+                        mid_images=mid_images[i].unsqueeze(0),
+                        M_pre=M_pre,
+                        pre_images=pre_images[i].unsqueeze(0),
+                        weeks_elapsed=weeks_t,
+                        pre_gtvp_mask=pm,
+                        pre_gtvn_mask=pm,
+                        return_change_map=True,
+                        detach_memory=False,
+                        training_mode=True,
+                    )
+
+                    target = _dual_target(mm)
+                    kl = out.get("kl_loss")
+                    losses = loss_fn(
+                        pred_masks=out["masks"],
+                        target_masks=target,
+                        change_logits=out.get("change_map"),
+                        pre_masks=pm,
+                        mid_masks=mm,
+                        kl_loss=kl,
+                        kl_beta=kl_beta_val,
+                    )
+
+                    step_loss = losses["total"]
+                    seq_loss = step_loss if seq_loss is None else seq_loss + step_loss
+                    for k in seq_comps:
+                        v = losses.get(k, None)
+                        if v is not None:
+                            seq_comps[k] += v.item() if torch.is_tensor(v) else float(v)
+                    n_in_seq += 1
+
+                seq_loss = seq_loss / max(n_in_seq, 1)
+                loss = seq_loss / accum
+
             scaler.scale(loss).backward()
 
         if is_sync_step:
