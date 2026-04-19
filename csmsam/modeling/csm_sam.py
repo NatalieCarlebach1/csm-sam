@@ -342,7 +342,7 @@ class CSMSAM(nn.Module):
             self._M_mid = torch.cat([self._M_mid, new_memory], dim=1)
             max_mid_tokens = self.memory_bank_max_slices * h * w
             if self._M_mid.shape[1] > max_mid_tokens:
-                self._M_mid = self._M_mid[:, -max_mid_tokens:]
+                self._M_mid = self._M_mid[:, -max_mid_tokens:].clone()
 
         # 5. Back to spatial
         enhanced_feats_spatial = enhanced_feats.reshape(B, h, w, C).permute(0, 3, 1, 2)
