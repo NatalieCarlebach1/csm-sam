@@ -9,11 +9,12 @@ data:
   num_workers: 3
   pin_memory: true
   tumor_ratio: 0.7
-  modality: "t2f"                       # t1c | t1n | t2f | t2w | all
+  modality: "all4"                       # t1c | t1n | t2f | t2w | all
   val_fraction: 0.10
 
 model:
   sam2_checkpoint: "checkpoints/sam2/sam2.1_hiera_large.pt"
+  in_chans: 4
   sam2_cfg: "sam2.1_hiera_l"
   d_model: 256
   num_heads: 8
