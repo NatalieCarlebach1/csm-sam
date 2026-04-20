@@ -329,6 +329,8 @@ class BraTSGLIDataset(Dataset):
         include_singletons: bool = False,
         weeks_elapsed: int = BRATS_FOLLOWUP_WEEKS_DEFAULT,
         val_fraction: float = 0.10,
+        n_folds: int = 1,
+        fold: int = 0,
     ):
         if modality not in VALID_MODALITIES:
             raise ValueError(f"modality must be one of {VALID_MODALITIES}, got {modality!r}")
@@ -457,7 +459,11 @@ class BraTSGLISliceDataset(Dataset):
         weeks_elapsed: int = BRATS_FOLLOWUP_WEEKS_DEFAULT,
         val_fraction: float = 0.10,
         volume_cache_size: int = 4,
+        n_folds: int = 1,
+        fold: int = 0,
     ):
+        n_folds: int = 1,
+        fold: int = 0,
         if modality not in VALID_MODALITIES:
             raise ValueError(f"modality must be one of {VALID_MODALITIES}, got {modality!r}")
 
