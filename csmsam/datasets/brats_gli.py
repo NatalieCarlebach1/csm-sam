@@ -171,14 +171,14 @@ def _load_modality_volume(pdir: Path, modality: str) -> np.ndarray:
     """
     Load normalized intensity volume(s) for a patient folder.
 
-    Single-modality returns (D, H, W); ``modality='all'`` returns
-    (3, D, H, W) with channels = (t1c, t2f, t2w) each percentile-normalized
-    independently.
+    Single-modality returns (D, H, W); all returns (3, D, H, W);
+    all4 returns (4, D, H, W) with t1c+t1n+t2f+t2w.
     """
     base = pdir.name
-    if modality == "all":
+    if modality in ("all", "all4"):
+        mods = ("t1c", "t2f", "t2w") if modality == "all" else ("t1c", "t1n", "t2f", "t2w")
         channels = []
-        for m in ("t1c", "t2f", "t2w"):
+        for m in mods:
             vol = load_nifti(pdir / f"{base}-{m}.nii.gz")
             channels.append(normalize_mri(vol))
         return np.stack(channels, axis=0)  # (3 or 4, D, H, W)
@@ -574,7 +574,7 @@ class BraTSGLISliceDataset(Dataset):
         slice_idx = min(max(0, slice_idx), N - 1)
 
         # Grab slice arrays for augmentation (needs float grids).
-        if self.modality == "all":
+        if self.modality in ("all", "all4"):
             pre_slice = pre_vol[:, slice_idx]  # (3, H, W)
             mid_slice = mid_vol[:, slice_idx]
         else:
@@ -592,7 +592,7 @@ class BraTSGLISliceDataset(Dataset):
             )
 
         # Build tensors
-        if self.modality == "all":
+        if self.modality in ("all", "all4"):
             pre_t = self._multimodal_slice_to_tensor(pre_slice)
             mid_t = self._multimodal_slice_to_tensor(mid_slice)
         else:
