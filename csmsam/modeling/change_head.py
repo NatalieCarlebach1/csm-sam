@@ -68,11 +68,11 @@ class ChangeHead(nn.Module):
             # Fuse pre-RT and mid-RT features
             nn.Conv2d(in_channels * 2, in_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(in_channels),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             # Reduce
             nn.Conv2d(in_channels, mid, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(mid),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             # Classify
             nn.Conv2d(mid, num_classes, kernel_size=1),
         )
