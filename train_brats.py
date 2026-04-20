@@ -28,6 +28,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+torch.backends.cudnn.enabled = False
 import torch.distributed as dist
 import torch.nn as nn
 from omegaconf import OmegaConf

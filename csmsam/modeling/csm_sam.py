@@ -503,7 +503,7 @@ class CSMSAM(nn.Module):
     @staticmethod
     def _expand_patch_embed(sam2_model, in_chans: int) -> None:
         """Expand SAM2 patch-embed proj from 3 to in_chans; new channels init as mean of existing 3."""
-        trunk = getattr(sam2_model, "image_encoder", None)
+        trunk = getattr(getattr(sam2_model, "image_encoder", None), "trunk", None)
         patch_embed = getattr(trunk, "patch_embed", None)
         if patch_embed is None or not hasattr(patch_embed, "proj"):
             return
