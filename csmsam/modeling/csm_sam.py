@@ -58,6 +58,7 @@ class CSMSAM(nn.Module):
         temporal_encoder_type: str = "continuous",
         temporal_hidden_dim: int = 128,
         temporal_n_frequencies: int = 6,
+        in_chans: int = 3,
         use_cross_patient_retrieval: bool = True,
         retrieval_k: int = 5,
         retrieval_n_tokens: int = 16,
@@ -284,6 +285,8 @@ class CSMSAM(nn.Module):
         return_change_map: bool = True,
         detach_memory: bool = False,
         retrieved_memory: torch.Tensor | None = None,
+        training_mode: bool = False,
+        pre_class_masks: "torch.Tensor | None" = None,
     ) -> dict[str, torch.Tensor]:
         """
         Forward pass for mid-RT segmentation.

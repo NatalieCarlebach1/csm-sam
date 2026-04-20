@@ -47,14 +47,6 @@ loss:
   consistency_fg: 1.0
   consistency_bg: 0.1
 
-change_latent:
-  enabled: true
-  d_z: 64
-  lambda_kl: 0.1
-  kl_warmup_epochs: 10
-  alpha: 0.5
-  retrieval_tau: 0.1
-
 retrieval:
   enabled: true
   k: 5
