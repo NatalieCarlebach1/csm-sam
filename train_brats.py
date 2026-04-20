@@ -40,7 +40,7 @@ from tqdm import tqdm
 from csmsam.datasets.brats_gli import BraTSGLIDataset, BraTSGLISliceDataset
 from csmsam.losses import CombinedLoss
 from csmsam.modeling import CSMSAM
-from csmsam.utils.metrics import compute_dice
+from csmsam.utils.metrics import compute_dice, compute_hd95
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +430,8 @@ def validate(model, loader, device, cfg):
     """
     model.eval()
     threshold = cfg.evaluation.threshold
-    dsc_wt_list, dsc_tc_list, dsc_et_list = [], [], []
+    voxel_spacing = tuple(cfg.evaluation.voxel_spacing)
+    dsc_wt_list, dsc_tc_list, dsc_et_list, hd95_list = [], [], [], []
 
     for batch in tqdm(loader, desc="Validating", leave=False):
         pre_images = batch["pre_image"].squeeze(0).to(device)
@@ -498,16 +499,19 @@ def validate(model, loader, device, cfg):
         dsc_wt_list.append(compute_dice(pred_wt, gt_wt))
         dsc_tc_list.append(compute_dice(pred_tc, gt_tc))
         dsc_et_list.append(compute_dice(pred_et, gt_et))
+        hd95_list.append(compute_hd95(pred_wt, gt_wt, voxel_spacing=voxel_spacing))
 
     dsc_wt   = float(np.mean(dsc_wt_list))  if dsc_wt_list  else 0.0
     dsc_tc   = float(np.mean(dsc_tc_list))  if dsc_tc_list  else 0.0
     dsc_et   = float(np.mean(dsc_et_list))  if dsc_et_list  else 0.0
     dsc_mean = (dsc_wt + dsc_tc + dsc_et) / 3.0
+    hd95_wt  = float(np.mean([h for h in hd95_list if not np.isinf(h)])) if hd95_list else float("nan")
     return {
         "dsc_wt":       dsc_wt,
         "dsc_tc":       dsc_tc,
         "dsc_et":       dsc_et,
         "dsc_mean":     dsc_mean,
+        "hd95_wt":      hd95_wt,
         "dsc_wt_std":   float(np.std(dsc_wt_list))  if dsc_wt_list  else 0.0,
         "dsc_tc_std":   float(np.std(dsc_tc_list))  if dsc_tc_list  else 0.0,
         "dsc_et_std":   float(np.std(dsc_et_list))  if dsc_et_list  else 0.0,
@@ -774,6 +778,7 @@ def main():
                     f" | WT={val_metrics.get('dsc_wt', 0):.4f}"
                     f" TC={val_metrics.get('dsc_tc', 0):.4f}"
                     f" ET={val_metrics.get('dsc_et', 0):.4f}"
+                    f" HD95={val_metrics.get('hd95_wt', float('nan')):.2f}mm"
                     f" mean={val_metrics['dsc_mean']:.4f}"
                     f" (best={best_metric:.4f})"
                 )
