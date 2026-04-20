@@ -495,7 +495,34 @@ class CSMSAM(nn.Module):
                 "  git clone https://github.com/facebookresearch/sam2.git\n"
                 "  pip install -e sam2/"
             )
+        in_chans = kwargs.pop("in_chans", 3)
+        if in_chans != 3:
+            CSMSAM._expand_patch_embed(sam2, in_chans)
         return cls(sam2_model=sam2, **kwargs)
+
+    @staticmethod
+    def _expand_patch_embed(sam2_model, in_chans: int) -> None:
+        """Expand SAM2 patch-embed proj from 3 to in_chans; new channels init as mean of existing 3."""
+        trunk = getattr(sam2_model, "image_encoder", None)
+        patch_embed = getattr(trunk, "patch_embed", None)
+        if patch_embed is None or not hasattr(patch_embed, "proj"):
+            return
+        old_proj = patch_embed.proj
+        if old_proj.in_channels == in_chans:
+            return
+        import torch.nn as nn
+        new_proj = nn.Conv2d(
+            in_chans, old_proj.out_channels,
+            kernel_size=old_proj.kernel_size, stride=old_proj.stride,
+            padding=old_proj.padding, bias=old_proj.bias is not None,
+        )
+        with torch.no_grad():
+            new_proj.weight[:, :3] = old_proj.weight
+            for i in range(3, in_chans):
+                new_proj.weight[:, i] = old_proj.weight.mean(dim=1)
+            if old_proj.bias is not None:
+                new_proj.bias.copy_(old_proj.bias)
+        patch_embed.proj = new_proj
 
     def get_trainable_params(self) -> list[dict]:
         novel_params = (

@@ -70,7 +70,7 @@ from .hnts_mrg import (
 )
 
 
-VALID_MODALITIES = ("t1c", "t1n", "t2f", "t2w", "all")
+VALID_MODALITIES = ("t1c", "t1n", "t2f", "t2w", "all", "all4")
 RESECTION_LABEL = 4  # excluded from binary tumor mask
 BRATS_FOLLOWUP_WEEKS_DEFAULT = 12  # BraTS follow-up ~= 3 months
 
@@ -154,8 +154,9 @@ def _modality_files_exist(pdir: Path, modality: str) -> bool:
     """Check whether the NIfTI files required for ``modality`` exist in pdir."""
     base = pdir.name
     required: list[str] = []
-    if modality == "all":
-        required = [f"{base}-t1c.nii.gz", f"{base}-t2f.nii.gz", f"{base}-t2w.nii.gz"]
+    if modality in ("all", "all4"):
+        mods = ("t1c", "t2f", "t2w") if modality == "all" else ("t1c", "t1n", "t2f", "t2w")
+        required = [f"{base}-{m}.nii.gz" for m in mods]
     else:
         required = [f"{base}-{modality}.nii.gz"]
     required.append(f"{base}-seg.nii.gz")
@@ -180,7 +181,7 @@ def _load_modality_volume(pdir: Path, modality: str) -> np.ndarray:
         for m in ("t1c", "t2f", "t2w"):
             vol = load_nifti(pdir / f"{base}-{m}.nii.gz")
             channels.append(normalize_mri(vol))
-        return np.stack(channels, axis=0)  # (3, D, H, W)
+        return np.stack(channels, axis=0)  # (3 or 4, D, H, W)
     vol = load_nifti(pdir / f"{base}-{modality}.nii.gz")
     return normalize_mri(vol)
 
@@ -193,19 +194,22 @@ def _load_seg_volume(pdir: Path) -> np.ndarray:
 
 def _to_rgb_multimodal(volume_4d: np.ndarray, slice_idx: int, size: int) -> torch.Tensor:
     """
-    Build a SAM2-normalized 3-channel tensor from a (3, D, H, W) multi-modal volume.
+    Build a normalized N-channel tensor from a (N, D, H, W) multi-modal volume.
     """
-    chans = volume_4d[:, slice_idx]  # (3, H, W)
-    t = torch.from_numpy(chans.astype(np.float32)).unsqueeze(0)  # (1, 3, H, W)
+    chans = volume_4d[:, slice_idx]  # (N, H, W)
+    N = chans.shape[0]
+    t = torch.from_numpy(chans.astype(np.float32)).unsqueeze(0)  # (1, N, H, W)
     t = F.interpolate(t, size=(size, size), mode="bilinear", align_corners=False)
-    t = t.squeeze(0)  # (3, H, W)
-    t = (t - SAM2_MEAN[:, None, None]) / SAM2_STD[:, None, None]
+    t = t.squeeze(0)  # (N, H, W)
+    mean = SAM2_MEAN if N == 3 else torch.cat([SAM2_MEAN, SAM2_MEAN[-1:]])
+    std  = SAM2_STD  if N == 3 else torch.cat([SAM2_STD,  SAM2_STD[-1:]])
+    t = (t - mean[:, None, None]) / std[:, None, None]
     return t
 
 
 def _slice_to_rgb(volume: np.ndarray, slice_idx: int, modality: str, size: int) -> torch.Tensor:
     """Dispatch to grayscale-replicated or multi-modal RGB tensor construction."""
-    if modality == "all":
+    if modality in ("all", "all4"):
         return _to_rgb_multimodal(volume, slice_idx, size)
     return to_rgb_tensor(volume[slice_idx].astype(np.float32), size)
 
