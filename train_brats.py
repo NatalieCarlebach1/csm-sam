@@ -40,7 +40,7 @@ from tqdm import tqdm
 from csmsam.datasets.brats_gli import BraTSGLIDataset, BraTSGLISliceDataset
 from csmsam.losses import CombinedLoss
 from csmsam.modeling import CSMSAM
-from csmsam.utils.metrics import compute_dice
+from csmsam.utils.metrics import compute_dice, compute_hd95
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +335,9 @@ def train_sequence_epoch(model, volume_loader, optimizer, scheduler, loss_fn,
 def validate(model, loader, device, cfg):
     model.eval()
     dsc_list = []
+    hd95_list = []
     threshold = cfg.evaluation.threshold
+    voxel_spacing = tuple(cfg.evaluation.voxel_spacing)
 
     for batch in tqdm(loader, desc="Validating", leave=False):
         pre_images = batch["pre_image"].squeeze(0).to(device)
@@ -377,10 +379,17 @@ def validate(model, loader, device, cfg):
         gt_vol   = (gt_masks > 0.5).squeeze(1).numpy()  # (N, H, W)
 
         dsc = compute_dice(pred_vol, gt_vol)
+        hd = compute_hd95(pred_vol, gt_vol, voxel_spacing=voxel_spacing)
         dsc_list.append(dsc)
+        hd95_list.append(hd)
 
-    mean_dsc = float(np.mean(dsc_list)) if dsc_list else 0.0
-    return {"dsc_mean": mean_dsc, "dsc_std": float(np.std(dsc_list)) if dsc_list else 0.0}
+    mean_dsc  = float(np.mean(dsc_list))  if dsc_list  else 0.0
+    mean_hd95 = float(np.mean([h for h in hd95_list if not np.isinf(h)])) if hd95_list else float("nan")
+    return {
+        "dsc_mean":  mean_dsc,
+        "dsc_std":   float(np.std(dsc_list))  if dsc_list  else 0.0,
+        "hd95_mean": mean_hd95,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -634,7 +643,7 @@ def main():
                 f"loss={train_metrics['total']:.4f}  dice={train_metrics['dice']:.4f}"
             )
             if val_metrics:
-                log_str += f" | val_DSC={val_metrics['dsc_mean']:.4f} (best={best_metric:.4f})"
+                log_str += f" | val_DSC={val_metrics['dsc_mean']:.4f}  HD95={val_metrics.get('hd95_mean', float('nan')):.2f}mm (best={best_metric:.4f})"
             log_str += f" | {elapsed:.1f}s"
             print(log_str)
 
