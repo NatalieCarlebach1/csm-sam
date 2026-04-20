@@ -70,7 +70,7 @@ from .hnts_mrg import (
 )
 
 
-VALID_MODALITIES = ("t1c", "t1n", "t2f", "t2w", "all")
+VALID_MODALITIES = ("t1c", "t1n", "t2f", "t2w", "all", "all4")
 RESECTION_LABEL = 4  # excluded from binary tumor mask
 BRATS_FOLLOWUP_WEEKS_DEFAULT = 12  # BraTS follow-up ~= 3 months
 
@@ -154,8 +154,9 @@ def _modality_files_exist(pdir: Path, modality: str) -> bool:
     """Check whether the NIfTI files required for ``modality`` exist in pdir."""
     base = pdir.name
     required: list[str] = []
-    if modality == "all":
-        required = [f"{base}-t1c.nii.gz", f"{base}-t2f.nii.gz", f"{base}-t2w.nii.gz"]
+    if modality in ("all", "all4"):
+        mods = ("t1c", "t2f", "t2w") if modality == "all" else ("t1c", "t1n", "t2f", "t2w")
+        required = [f"{base}-{m}.nii.gz" for m in mods]
     else:
         required = [f"{base}-{modality}.nii.gz"]
     required.append(f"{base}-seg.nii.gz")
@@ -175,12 +176,13 @@ def _load_modality_volume(pdir: Path, modality: str) -> np.ndarray:
     independently.
     """
     base = pdir.name
-    if modality == "all":
+    if modality in ("all", "all4"):
+        mods = ("t1c", "t2f", "t2w") if modality == "all" else ("t1c", "t1n", "t2f", "t2w")
         channels = []
-        for m in ("t1c", "t2f", "t2w"):
+        for m in mods:
             vol = load_nifti(pdir / f"{base}-{m}.nii.gz")
             channels.append(normalize_mri(vol))
-        return np.stack(channels, axis=0)  # (3, D, H, W)
+        return np.stack(channels, axis=0)  # (3 or 4, D, H, W)
     vol = load_nifti(pdir / f"{base}-{modality}.nii.gz")
     return normalize_mri(vol)
 
@@ -192,20 +194,21 @@ def _load_seg_volume(pdir: Path) -> np.ndarray:
 
 
 def _to_rgb_multimodal(volume_4d: np.ndarray, slice_idx: int, size: int) -> torch.Tensor:
-    """
-    Build a SAM2-normalized 3-channel tensor from a (3, D, H, W) multi-modal volume.
-    """
-    chans = volume_4d[:, slice_idx]  # (3, H, W)
-    t = torch.from_numpy(chans.astype(np.float32)).unsqueeze(0)  # (1, 3, H, W)
+    """Build a normalized N-channel tensor from a (N, D, H, W) multi-modal volume."""
+    chans = volume_4d[:, slice_idx]  # (N, H, W)
+    N = chans.shape[0]
+    t = torch.from_numpy(chans.astype(np.float32)).unsqueeze(0)  # (1, N, H, W)
     t = F.interpolate(t, size=(size, size), mode="bilinear", align_corners=False)
-    t = t.squeeze(0)  # (3, H, W)
-    t = (t - SAM2_MEAN[:, None, None]) / SAM2_STD[:, None, None]
+    t = t.squeeze(0)  # (N, H, W)
+    mean = SAM2_MEAN if N == 3 else torch.cat([SAM2_MEAN, SAM2_MEAN[-1:]])
+    std  = SAM2_STD  if N == 3 else torch.cat([SAM2_STD,  SAM2_STD[-1:]])
+    t = (t - mean[:, None, None]) / std[:, None, None]
     return t
 
 
 def _slice_to_rgb(volume: np.ndarray, slice_idx: int, modality: str, size: int) -> torch.Tensor:
     """Dispatch to grayscale-replicated or multi-modal RGB tensor construction."""
-    if modality == "all":
+    if modality in ("all", "all4"):
         return _to_rgb_multimodal(volume, slice_idx, size)
     return to_rgb_tensor(volume[slice_idx].astype(np.float32), size)
 
@@ -226,6 +229,8 @@ def _build_split_indices(
     include_singletons: bool,
     val_fraction: float = 0.10,
     seed: int = 1234,
+    n_folds: int = 1,
+    fold: int = 0,
 ) -> tuple[list[dict], list[dict]]:
     """
     Return (pair_records, singleton_records) for the requested dataset split.
@@ -259,19 +264,29 @@ def _build_split_indices(
     single_pids.sort()
 
     if split in ("train", "val"):
-        # Deterministic train/val partition on the sorted pair list.
-        n_pairs = len(pair_pids)
-        n_val = max(1, int(round(n_pairs * val_fraction))) if n_pairs > 0 else 0
-        rng = random.Random(seed)
-        shuffled = pair_pids.copy()
-        rng.shuffle(shuffled)
-        val_pids = set(shuffled[:n_val])
-        if split == "train":
-            selected_pairs = [p for p in pair_pids if p not in val_pids]
-            selected_singles = single_pids if include_singletons else []
-        else:  # val
-            selected_pairs = [p for p in pair_pids if p in val_pids]
-            selected_singles = []  # val never uses singletons
+        if n_folds > 1:
+            # k-fold CV: assign patients to folds by index modulo n_folds
+            val_pids = set(p for i, p in enumerate(pair_pids) if i % n_folds == fold)
+            if split == "train":
+                selected_pairs = [p for p in pair_pids if p not in val_pids]
+                selected_singles = single_pids if include_singletons else []
+            else:  # val
+                selected_pairs = [p for p in pair_pids if p in val_pids]
+                selected_singles = []
+        else:
+            # Deterministic train/val partition on the sorted pair list.
+            n_pairs = len(pair_pids)
+            n_val = max(1, int(round(n_pairs * val_fraction))) if n_pairs > 0 else 0
+            rng = random.Random(seed)
+            shuffled = pair_pids.copy()
+            rng.shuffle(shuffled)
+            val_pids = set(shuffled[:n_val])
+            if split == "train":
+                selected_pairs = [p for p in pair_pids if p not in val_pids]
+                selected_singles = single_pids if include_singletons else []
+            else:  # val
+                selected_pairs = [p for p in pair_pids if p in val_pids]
+                selected_singles = []  # val never uses singletons
     else:  # test
         selected_pairs = pair_pids
         selected_singles = single_pids if include_singletons else []
@@ -292,6 +307,19 @@ def _build_split_indices(
         for pid in selected_singles
     ]
     return pair_records, singleton_records
+
+
+
+def _per_class_masks(seg_vol):
+    """
+    Per-class binary masks for BraTS labels 1-4.
+    Returns (4, ...) float32 array: channel k = (seg_vol == k+1).
+    """
+    import numpy as _np
+    out = _np.zeros((4,) + seg_vol.shape, dtype=_np.float32)
+    for k in range(4):
+        out[k] = (seg_vol == k + 1).astype(_np.float32)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +357,8 @@ class BraTSGLIDataset(Dataset):
         include_singletons: bool = False,
         weeks_elapsed: int = BRATS_FOLLOWUP_WEEKS_DEFAULT,
         val_fraction: float = 0.10,
+        n_folds: int = 1,
+        fold: int = 0,
     ):
         if modality not in VALID_MODALITIES:
             raise ValueError(f"modality must be one of {VALID_MODALITIES}, got {modality!r}")
@@ -347,6 +377,8 @@ class BraTSGLIDataset(Dataset):
             modality=modality,
             include_singletons=include_singletons,
             val_fraction=val_fraction,
+            n_folds=n_folds,
+            fold=fold,
         )
 
         if not self.pair_records:
@@ -414,6 +446,22 @@ class BraTSGLIDataset(Dataset):
         pre_sem = self._resize_semantic(pre_seg)
         mid_sem = self._resize_semantic(mid_seg)
 
+        # Per-class masks (N, 4, H, W): channels 0-3 = labels 1-4
+        pre_cls_masks = torch.stack([
+            torch.stack([
+                to_mask_tensor(_per_class_masks(pre_seg[i])[k], self.image_size)
+                for k in range(4)
+            ]).squeeze(1)
+            for i in range(N)
+        ])
+        mid_cls_masks = torch.stack([
+            torch.stack([
+                to_mask_tensor(_per_class_masks(mid_seg[i])[k], self.image_size)
+                for k in range(4)
+            ]).squeeze(1)
+            for i in range(N)
+        ])
+
         return {
             "pre_image": pre_images,
             "mid_image": mid_images,
@@ -421,6 +469,8 @@ class BraTSGLIDataset(Dataset):
             "mid_mask": mid_masks,
             "pre_mask_semantic": pre_sem,
             "mid_mask_semantic": mid_sem,
+            "pre_mask_classes": pre_cls_masks,
+            "mid_mask_classes": mid_cls_masks,
             "weeks_elapsed": self.weeks_elapsed,
             "patient_id": rec["patient_id"],
         }
@@ -457,6 +507,8 @@ class BraTSGLISliceDataset(Dataset):
         weeks_elapsed: int = BRATS_FOLLOWUP_WEEKS_DEFAULT,
         val_fraction: float = 0.10,
         volume_cache_size: int = 4,
+        n_folds: int = 1,
+        fold: int = 0,
     ):
         if modality not in VALID_MODALITIES:
             raise ValueError(f"modality must be one of {VALID_MODALITIES}, got {modality!r}")
@@ -478,6 +530,8 @@ class BraTSGLISliceDataset(Dataset):
             modality=modality,
             include_singletons=False,
             val_fraction=val_fraction,
+            n_folds=n_folds,
+            fold=fold,
         )
         if not self.pair_records:
             raise FileNotFoundError(
@@ -564,8 +618,8 @@ class BraTSGLISliceDataset(Dataset):
         slice_idx = min(max(0, slice_idx), N - 1)
 
         # Grab slice arrays for augmentation (needs float grids).
-        if self.modality == "all":
-            pre_slice = pre_vol[:, slice_idx]  # (3, H, W)
+        if self.modality in ("all", "all4"):
+            pre_slice = pre_vol[:, slice_idx]  # (3 or 4, H, W)
             mid_slice = mid_vol[:, slice_idx]
         else:
             pre_slice = pre_vol[slice_idx]     # (H, W)
@@ -582,7 +636,7 @@ class BraTSGLISliceDataset(Dataset):
             )
 
         # Build tensors
-        if self.modality == "all":
+        if self.modality in ("all", "all4"):
             pre_t = self._multimodal_slice_to_tensor(pre_slice)
             mid_t = self._multimodal_slice_to_tensor(mid_slice)
         else:
@@ -594,6 +648,16 @@ class BraTSGLISliceDataset(Dataset):
         pre_sem_t = self._resize_semantic_slice(pre_sem)
         mid_sem_t = self._resize_semantic_slice(mid_sem)
 
+        # Per-class masks for this slice (4, H, W)
+        pre_cls_np = _per_class_masks(pre_sem)
+        mid_cls_np = _per_class_masks(mid_sem)
+        pre_cls_t = torch.stack([
+            to_mask_tensor(pre_cls_np[k], self.image_size) for k in range(4)
+        ]).squeeze(1)
+        mid_cls_t = torch.stack([
+            to_mask_tensor(mid_cls_np[k], self.image_size) for k in range(4)
+        ]).squeeze(1)
+
         return {
             "pre_image": pre_t,
             "mid_image": mid_t,
@@ -601,6 +665,8 @@ class BraTSGLISliceDataset(Dataset):
             "mid_mask": mid_mask_t,
             "pre_mask_semantic": pre_sem_t,
             "mid_mask_semantic": mid_sem_t,
+            "pre_mask_classes": pre_cls_t,
+            "mid_mask_classes": mid_cls_t,
             "weeks_elapsed": self.weeks_elapsed,
             "patient_id": rec["patient_id"],
             "slice_idx": int(slice_idx),
@@ -608,16 +674,19 @@ class BraTSGLISliceDataset(Dataset):
 
     # ---- Helpers ---------------------------------------------------------
 
-    def _multimodal_slice_to_tensor(self, chans: np.ndarray) -> torch.Tensor:
-        """(3, H, W) float → SAM2-normalized (3, size, size) tensor."""
-        t = torch.from_numpy(chans.astype(np.float32)).unsqueeze(0)  # (1, 3, H, W)
+    def _multimodal_slice_to_tensor(self, chans):
+        """(N, H, W) float -> normalized (N, size, size) tensor."""
+        import torch as _torch
+        N = chans.shape[0]
+        t = _torch.from_numpy(chans.astype("float32")).unsqueeze(0)
         t = F.interpolate(t, size=(self.image_size, self.image_size), mode="bilinear", align_corners=False)
         t = t.squeeze(0)
-        t = (t - SAM2_MEAN[:, None, None]) / SAM2_STD[:, None, None]
-        return t
+        mean = SAM2_MEAN if N == 3 else _torch.cat([SAM2_MEAN, SAM2_MEAN[-1:]])
+        std  = SAM2_STD  if N == 3 else _torch.cat([SAM2_STD,  SAM2_STD[-1:]])
+        return (t - mean[:, None, None]) / std[:, None, None]
 
-    def _resize_semantic_slice(self, sem_2d: np.ndarray) -> torch.Tensor:
-        t = torch.from_numpy(sem_2d.astype(np.int64)).unsqueeze(0).unsqueeze(0).float()
+    def _resize_semantic_slice(self, sem_2d):
+        t = __import__("torch").from_numpy(sem_2d.astype("int64")).unsqueeze(0).unsqueeze(0).float()
         t = F.interpolate(t, size=(self.image_size, self.image_size), mode="nearest")
         return t.squeeze(0).squeeze(0).long()
 
@@ -676,6 +745,8 @@ def build_dataloaders(
     tumor_ratio: float = 0.7,
     include_singletons: bool = False,
     val_fraction: float = 0.10,
+    n_folds: int = 1,
+    fold: int = 0,
 ) -> dict[str, DataLoader]:
     """
     Build train (slice-level) + val/test (volume-level) DataLoaders for BraTS-GLI.
@@ -695,6 +766,8 @@ def build_dataloaders(
         tumor_ratio=tumor_ratio,
         sequence_length=sequence_length,
         val_fraction=val_fraction,
+        n_folds=n_folds,
+        fold=fold,
     )
     val_ds = BraTSGLIDataset(
         data_dir,
@@ -704,6 +777,8 @@ def build_dataloaders(
         sequence_length=sequence_length,
         include_singletons=False,
         val_fraction=val_fraction,
+        n_folds=n_folds,
+        fold=fold,
     )
     test_ds = BraTSGLIDataset(
         data_dir,

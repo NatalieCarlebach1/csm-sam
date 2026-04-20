@@ -324,6 +324,7 @@ class CSMSAM(nn.Module):
         detach_memory: bool = False,
         retrieved_memory: torch.Tensor | None = None,
         training_mode: bool | None = None,
+        pre_class_masks: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Forward pass for mid-RT segmentation.
@@ -420,24 +421,42 @@ class CSMSAM(nn.Module):
         )
 
         # 4. Update within-session memory.
-        # KEY: do NOT detach during training so the gate learns.
-        # The trailing-window keeps OOM in check.
-        new_memory = enhanced_feats.detach() if detach_memory else enhanced_feats
+        # Store a detached clone in the memory bank (TBPTT-style).
+        # This avoids in-place version conflicts during sequence backprop:
+        # model parameters (LayerNorm/FFN biases) that are used in the current
+        # slice's forward may be updated in-place by later ops, but the stored
+        # _M_mid tensor is no longer in the autograd graph, so no version clash.
+        # Gradients still flow through each slice's cross-session attention and
+        # the gate, just not backwards *through the bank* into previous slices.
+        new_memory_stored = enhanced_feats.detach().clone()
         if self._M_mid is None:
-            self._M_mid = new_memory
+            self._M_mid = new_memory_stored
         else:
-            self._M_mid = torch.cat([self._M_mid, new_memory], dim=1)
+            self._M_mid = torch.cat([self._M_mid, new_memory_stored], dim=1)
             max_mid_tokens = self.memory_bank_max_slices * h * w
             if self._M_mid.shape[1] > max_mid_tokens:
-                self._M_mid = self._M_mid[:, -max_mid_tokens:].clone()
+                self._M_mid = self._M_mid[:, -max_mid_tokens:]
 
         # 5. Back to spatial
         enhanced_feats_spatial = enhanced_feats.reshape(B, h, w, C).permute(0, 3, 1, 2)
 
-        # 6. SAM2 mask decoder — run ONCE per structure with its pre-RT mask prompt.
-        mask_p = self._decode_with_mask_prompt(enhanced_feats_spatial, pre_gtvp_mask, (H, W))
-        mask_n = self._decode_with_mask_prompt(enhanced_feats_spatial, pre_gtvn_mask, (H, W))
-        masks = torch.cat([mask_p, mask_n], dim=1)            # (B, 2, H, W)
+        # 6. SAM2 mask decoder — 4-class or 2-channel fallback.
+        if pre_class_masks is not None:
+            # 4-class mode: one decode per BraTS label (NETC, SNFH, ET, RC)
+            class_mask_list = []
+            for k in range(4):
+                m_k = self._decode_with_mask_prompt(
+                    enhanced_feats_spatial,
+                    pre_class_masks[:, k:k+1, :, :],
+                    (H, W),
+                )
+                class_mask_list.append(m_k)
+            masks = torch.cat(class_mask_list, dim=1)          # (B, 4, H, W)
+        else:
+            # Legacy 2-channel mode: GTVp + GTVn
+            mask_p = self._decode_with_mask_prompt(enhanced_feats_spatial, pre_gtvp_mask, (H, W))
+            mask_n = self._decode_with_mask_prompt(enhanced_feats_spatial, pre_gtvn_mask, (H, W))
+            masks = torch.cat([mask_p, mask_n], dim=1)         # (B, 2, H, W)
 
         result = {
             "masks": masks,
@@ -581,7 +600,35 @@ class CSMSAM(nn.Module):
                 "  git clone https://github.com/facebookresearch/sam2.git\n"
                 "  pip install -e sam2/"
             )
+        in_chans = kwargs.pop("in_chans", 3)
+        if in_chans != 3:
+            CSMSAM._expand_patch_embed(sam2, in_chans)
         return cls(sam2_model=sam2, **kwargs)
+
+    @staticmethod
+    def _expand_patch_embed(sam2_model, in_chans: int) -> None:
+        """Expand patch embedding to in_chans; new channels init as mean of existing 3."""
+        import torch.nn as nn
+        backbone = getattr(sam2_model, "image_encoder", sam2_model)
+        trunk = getattr(backbone, "trunk", backbone)
+        patch_embed = getattr(trunk, "patch_embed", None)
+        if patch_embed is None or not hasattr(patch_embed, "proj"):
+            return
+        old_proj = patch_embed.proj
+        if old_proj.in_channels == in_chans:
+            return
+        new_proj = nn.Conv2d(
+            in_chans, old_proj.out_channels,
+            kernel_size=old_proj.kernel_size, stride=old_proj.stride,
+            padding=old_proj.padding, bias=old_proj.bias is not None,
+        )
+        with torch.no_grad():
+            new_proj.weight[:, :3] = old_proj.weight
+            for i in range(3, in_chans):
+                new_proj.weight[:, i] = old_proj.weight.mean(dim=1)
+            if old_proj.bias is not None:
+                new_proj.bias.copy_(old_proj.bias)
+        patch_embed.proj = new_proj
 
     def get_trainable_params(self) -> list[dict]:
         novel_params = (
