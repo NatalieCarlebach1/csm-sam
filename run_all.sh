@@ -33,6 +33,8 @@
 #   --master_addr     IP of rank-0 node               (default: localhost)
 #   --master_port     rendezvous port                 (default: 29500)
 #   --skip_setup      skip setup (if already done)
+#   --conda_env       conda environment name to use (e.g. owl-env)
+#   --sam2_checkpoint full path to SAM2 checkpoint (overrides --ckpt_dir)
 
 set -e
 
@@ -55,6 +57,8 @@ NODE_RANK=0
 MASTER_ADDR="localhost"
 MASTER_PORT=29500
 SKIP_SETUP=false
+CONDA_ENV=""
+SAM2_CKPT_OVERRIDE=""
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -76,12 +80,32 @@ while [[ $# -gt 0 ]]; do
     --node_rank)      NODE_RANK="$2";    shift 2 ;;
     --master_addr)    MASTER_ADDR="$2";  shift 2 ;;
     --master_port)    MASTER_PORT="$2";  shift 2 ;;
-    --skip_setup)     SKIP_SETUP=true;   shift   ;;
+    --skip_setup)        SKIP_SETUP=true;          shift   ;;
+    --conda_env)         CONDA_ENV="$2";           shift 2 ;;
+    --sam2_checkpoint)   SAM2_CKPT_OVERRIDE="$2";  shift 2 ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
 
-SAM2_CKPT="$CKPT_DIR/sam2.1_hiera_large.pt"
+# ── Resolve Python / torchrun ─────────────────────────────────────────────────
+if [ -n "$CONDA_ENV" ]; then
+  CONDA_BASE=$(conda info --base 2>/dev/null || echo "$HOME/anaconda3")
+  PY="$CONDA_BASE/envs/$CONDA_ENV/bin/python3"
+  TORCHRUN="$CONDA_BASE/envs/$CONDA_ENV/bin/torchrun"
+  PIP="$CONDA_BASE/envs/$CONDA_ENV/bin/pip"
+  echo "Using conda env: $CONDA_ENV ($PY)"
+else
+  PY=$(which python3)
+  TORCHRUN=$(which torchrun)
+  PIP=$(which pip)
+fi
+
+if [ -n "$SAM2_CKPT_OVERRIDE" ]; then
+  SAM2_CKPT="$SAM2_CKPT_OVERRIDE"
+else
+  SAM2_CKPT="$CKPT_DIR/sam2.1_hiera_large.pt"
+fi
+
 TOTAL_GPUS=$(( GPUS * NODES ))
 
 echo "========================================================"
@@ -96,7 +120,7 @@ echo "========================================================"
 if [ "$SKIP_SETUP" = false ]; then
   echo ""
   echo "[1/4] Installing csmsam package..."
-  pip install -e ".[dev]" --quiet
+  $PIP install -e ".[dev]" --quiet
   echo "      Done."
 else
   echo "[1/4] Skipping setup."
@@ -116,8 +140,8 @@ if [ "$SKIP_SETUP" = false ]; then
     aws s3 cp "$S3_CKPT" "$SAM2_CKPT"
   else
     echo "      Downloading from HuggingFace..."
-    pip install -q huggingface_hub
-    python3 - <<PYEOF
+    $PIP install -q huggingface_hub
+    $PY - <<PYEOF
 from huggingface_hub import hf_hub_download
 import shutil, os
 path = hf_hub_download(repo_id="facebook/sam2.1-hiera-large", filename="sam2.1_hiera_large.pt")
@@ -143,7 +167,7 @@ if [ "$SKIP_SETUP" = false ]; then
 
   if [ "$SYNTHETIC" = true ] && [ "$NEED_PREPROCESS" = true ]; then
     echo "      Generating $N_SYNTHETIC synthetic patients..."
-    python3 data/download_hnts_mrg.py --synthetic --n_synthetic "$N_SYNTHETIC" --output_dir "$DATA_DIR"
+    $PY data/download_hnts_mrg.py --synthetic --n_synthetic "$N_SYNTHETIC" --output_dir "$DATA_DIR"
     NEED_PREPROCESS=false
   elif [ -n "$S3_DATA" ] && [ "$NEED_PREPROCESS" = true ]; then
     echo "      Syncing raw data from $S3_DATA → $RAW_DIR"
@@ -162,7 +186,7 @@ if [ "$SKIP_SETUP" = false ]; then
       exit 1
     fi
     echo "      Preprocessing..."
-    python3 data/preprocess.py --input_dir "$RAW_DIR" --output_dir "$DATA_DIR" --n_workers 4
+    $PY data/preprocess.py --input_dir "$RAW_DIR" --output_dir "$DATA_DIR" --n_workers 4
   fi
 fi
 
@@ -183,7 +207,7 @@ run_fold() {
   local extra="$1"
   local base="--config $CONFIG --data_dir $DATA_DIR --sam2_checkpoint $SAM2_CKPT $extra"
   if [ "$TOTAL_GPUS" -gt 1 ]; then
-    torchrun \
+    $TORCHRUN \
       --nproc_per_node="$GPUS" \
       --nnodes="$NODES" \
       --node_rank="$NODE_RANK" \
@@ -191,7 +215,7 @@ run_fold() {
       --master_port="$MASTER_PORT" \
       train.py $base
   else
-    python3 train.py $base
+    $PY train.py $base
   fi
 }
 
