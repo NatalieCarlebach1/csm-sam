@@ -13,7 +13,7 @@ data:
 # ─── Model ───────────────────────────────────────────────────────────────────
 model:
   sam2_checkpoint: "checkpoints/sam2/sam2.1_hiera_large.pt"
-  sam2_cfg: "sam2_hiera_large"         # SAM2 model config name
+  sam2_cfg: "sam2.1_hiera_l"           # SAM2 model config name
   d_model: 256                         # feature dimension (matches SAM2-L)
   num_heads: 8                         # attention heads
   n_memory_frames: 8                   # pre-RT slices encoded into memory

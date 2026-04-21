@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Download HNTS-MRG 2024 dataset from Zenodo.
 
