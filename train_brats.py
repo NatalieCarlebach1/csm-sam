@@ -506,7 +506,7 @@ def validate(model, loader, device, cfg):
     dsc_tc   = float(np.mean(dsc_tc_list))  if dsc_tc_list  else 0.0
     dsc_et   = float(np.mean(dsc_et_list))  if dsc_et_list  else 0.0
     dsc_mean = (dsc_wt + dsc_tc + dsc_et) / 3.0
-    hd95_wt  = float(np.mean([h for h in hd95_list if not np.isinf(h)])) if hd95_list else float("nan")
+    hd95_wt  = float(np.mean([h for h in hd95_list if np.isfinite(h)])) if hd95_list else float("nan")
     return {
         "dsc_wt":       dsc_wt,
         "dsc_tc":       dsc_tc,
@@ -759,10 +759,13 @@ def main():
                 loss_fn, scaler, device, cfg, epoch, world_size,
             )
 
+        if world_size > 1:
+            dist.barrier()
+
         val_metrics = {}
         is_best = False
         if is_main(rank) and epoch % cfg.evaluation.val_every_n_epochs == 0:
-            val_metrics = validate(model, loaders["val"], device, cfg)
+            val_metrics = validate(unwrap(model), loaders["val"], device, cfg)
             current = val_metrics.get("dsc_mean", 0.0)
             is_best = current > best_metric
             if is_best:
@@ -777,10 +780,7 @@ def main():
             if val_metrics:
                 log_str += (
                     f" | WT={val_metrics.get('dsc_wt', 0):.4f}"
-                    f" TC={val_metrics.get('dsc_tc', 0):.4f}"
-                    f" ET={val_metrics.get('dsc_et', 0):.4f}"
                     f" HD95={val_metrics.get('hd95_wt', float('nan')):.2f}mm"
-                    f" mean={val_metrics['dsc_mean']:.4f}"
                     f" (best={best_metric:.4f})"
                 )
             log_str += f" | {elapsed:.1f}s"

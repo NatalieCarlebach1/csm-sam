@@ -151,6 +151,16 @@ HNTS-MRG 2024 is available on Zenodo (DOI: 10.5281/zenodo.11199559) and via Gran
 - **Change map IoU**: Ablation metric for the change prediction head.
 - **Feature consistency MSE**: Ablation metric for the evolution predictor.
 
+## BraTS-GLI Evaluation Strategy (Option A — binary WT only)
+BraTS-GLI is used as a **secondary generalization benchmark** (pre-treatment → post-treatment glioma). There is no published SOTA for this specific longitudinal task, so we are not matching an external leaderboard.
+
+**Decision**: Report **WT Dice** and **HD95(WT)** only. The model outputs a single binary channel (whole-tumor mask). Multi-class WT/TC/ET metrics are not reported because:
+1. No longitudinal BraTS SOTA exists to compare against.
+2. TC and ET require multi-class output (3 separate heads), which triples training complexity for no comparative gain.
+3. WT Dice is sufficient to demonstrate cross-dataset generalization in the NeurIPS paper.
+
+**Known validation quirk**: `train_brats.py` prints `WT=x TC=x ET=x` but all three are identical (same binary mask). Only the `WT=` and `HD95=` values are meaningful. HD95 uses `np.isfinite` filter to suppress nan from empty-mask edge cases.
+
 ## Reference documents
 - `baselines/LANDSCAPE.md` — 6-axis positioning system (temporal scope / pre-signal / backbone / params / change head / temporal embed) with one row per baseline and CSM-SAM placed in the top-right "strongest-backbone × richest-pre-session-mechanism" quadrant.
 - `baselines/SOTA.md` — current state-of-the-art numbers per dataset, plus method blurbs (what each SOTA method does + why it's different from CSM-SAM).
