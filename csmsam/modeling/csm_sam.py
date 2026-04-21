@@ -147,6 +147,17 @@ class CSMSAM(nn.Module):
         """
         B, N, C_img, H, W = pre_images.shape
 
+        # Subsample slices BEFORE encoding: CrossSessionMemoryEncoder only keeps
+        # n_memory_frames slices anyway, so encoding the rest wastes GPU memory
+        # proportional to N/n_memory_frames (~12x for a typical 100-slice volume).
+        n_frames = self.memory_encoder.n_memory_frames
+        if N > n_frames:
+            indices = torch.linspace(0, N - 1, n_frames, dtype=torch.long, device=pre_images.device)
+            pre_images = pre_images[:, indices]
+            if pre_masks is not None:
+                pre_masks = pre_masks[:, indices]
+            N = n_frames
+
         # Batched feature extraction: flatten (B, N) -> (B*N), then reshape back.
         flat_imgs = pre_images.reshape(B * N, C_img, H, W)
         flat_feats = self._get_sam2_features(flat_imgs)       # (B*N, C, h, w)

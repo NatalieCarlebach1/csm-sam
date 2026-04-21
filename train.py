@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import random
@@ -18,12 +19,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from omegaconf import OmegaConf
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, DistributedSampler, Subset
 from tqdm import tqdm
 
 from csmsam.datasets import HNTSMRGDataset, HNTSMRGSliceDataset, build_dataloaders
@@ -32,12 +34,42 @@ from csmsam.modeling import CSMSAM
 from csmsam.utils.metrics import aggregate_metrics, compute_agg_dsc
 
 
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+def setup_ddp():
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    rank       = int(os.environ.get("RANK",       0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    if world_size > 1:
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+    return local_rank, rank, world_size
+
+
+def cleanup_ddp():
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def is_main(rank): return rank == 0
+
+
+def unwrap(model):
+    return model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
+
+
+def reduce_scalar(value, world_size):
+    if world_size == 1:
+        return value
+    t = torch.tensor(value, dtype=torch.float64, device="cuda")
+    dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return (t / world_size).item()
+
+
+def set_seed(seed: int, rank: int = 0):
+    random.seed(seed + rank)
+    np.random.seed(seed + rank)
+    torch.manual_seed(seed + rank)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+        torch.cuda.manual_seed_all(seed + rank)
 
 
 def build_optimizer(model: CSMSAM, cfg) -> torch.optim.Optimizer:
@@ -208,7 +240,7 @@ def train_one_epoch(
 
 
 def train_sequence_epoch(
-    model: CSMSAM,
+    model,
     volume_loader,
     optimizer,
     scheduler,
@@ -217,37 +249,44 @@ def train_sequence_epoch(
     device: str,
     cfg,
     epoch: int,
+    world_size: int = 1,
 ) -> dict:
     """
-    Sequence-mode training.
+    Sequence-mode training with TBPTT, DDP no_sync, and BN-eval fix.
 
     For each patient volume:
-      - Encode pre-RT memory once from ALL pre-RT slices.
+      - Encode pre-RT memory once (subsampled slices only, no_grad).
       - Sample S consecutive mid-RT slices.
-      - Reset M_mid, then forward slices one-by-one WITHOUT resetting memory,
-        accumulating loss.
-      - Backward once after the full sequence (per effective grad-accum step).
+      - Reset M_mid, then forward + backward one slice at a time (TBPTT).
+        retain_graph=True for all but the last slice so the graph doesn't
+        accumulate across the full sequence (avoids OOM on long sequences).
     """
     model.train()
+    # BN layers must stay in eval during sequence training — in-place updates
+    # cause DDP version-counter mismatches on parameters used across steps.
+    for m in model.modules():
+        if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+            m.eval()
+
     total_losses = {"total": 0.0, "dice": 0.0, "bce": 0.0, "change": 0.0}
     n_steps = 0
     accumulate = cfg.training.accumulate_grad_batches
     seq_len = max(1, int(cfg.training.sequence_length))
     gtvn_weight = getattr(cfg.loss, "gtvn_weight", 1.0)
+    rank = dist.get_rank() if dist.is_initialized() else 0
 
     optimizer.zero_grad()
-    pbar = tqdm(volume_loader, desc=f"Epoch {epoch} [seq]", leave=False)
+    pbar = tqdm(volume_loader, desc=f"Epoch {epoch} [seq]", leave=False, disable=not is_main(rank))
 
     for step, batch in enumerate(pbar):
-        # Volume loader uses batch_size=1. Squeeze the batch dim.
         pre_images = batch["pre_images"].squeeze(0).to(device)          # (N, 3, H, W)
-        mid_images = batch["mid_images"].squeeze(0).to(device)          # (N, 3, H, W)
+        mid_images = batch["mid_images"].squeeze(0).to(device)
         pre_masks_combined = batch["pre_masks"].squeeze(0).to(device)   # (N, 1, H, W)
-        mid_masks_combined = batch["mid_masks"].squeeze(0).to(device)   # (N, 1, H, W)
-        pre_gtvp = batch["pre_masks_gtvp"].squeeze(0).to(device)        # (N, 1, H, W)
-        pre_gtvn = batch["pre_masks_gtvn"].squeeze(0).to(device)        # (N, 1, H, W)
-        mid_gtvp = batch["mid_masks_gtvp"].squeeze(0).to(device)        # (N, 1, H, W)
-        mid_gtvn = batch["mid_masks_gtvn"].squeeze(0).to(device)        # (N, 1, H, W)
+        mid_masks_combined = batch["mid_masks"].squeeze(0).to(device)
+        pre_gtvp = batch["pre_masks_gtvp"].squeeze(0).to(device)
+        pre_gtvn = batch["pre_masks_gtvn"].squeeze(0).to(device)
+        mid_gtvp = batch["mid_masks_gtvp"].squeeze(0).to(device)
+        mid_gtvn = batch["mid_masks_gtvn"].squeeze(0).to(device)
 
         weeks = batch["weeks_elapsed"]
         if isinstance(weeks, (list, tuple)):
@@ -258,8 +297,6 @@ def train_sequence_epoch(
         if N == 0:
             continue
 
-        # Pick a random consecutive window of S slices, biased toward tumor
-        # slices when available.
         S = min(seq_len, N)
         tumor_slice_mask = (mid_masks_combined.flatten(1).sum(dim=1) > 0).cpu().numpy()
         tumor_indices = np.where(tumor_slice_mask)[0]
@@ -269,68 +306,70 @@ def train_sequence_epoch(
         else:
             start = random.randint(0, max(0, N - S))
         window = slice(start, start + S)
+        n_steps_in_window = window.stop - window.start
+
+        is_sync_step = (step + 1) % accumulate == 0
 
         with autocast(enabled=cfg.training.amp):
-            # Encode pre-RT memory ONCE from all pre-RT slices of this patient.
-            M_pre = model.encode_pre_rt(
-                pre_images.unsqueeze(0),                  # (1, N, 3, H, W)
-                pre_masks_combined.unsqueeze(0),          # (1, N, 1, H, W)
-            )  # (1, N_mem, C)
+            M_pre = unwrap(model).encode_pre_rt(
+                pre_images.unsqueeze(0),
+                pre_masks_combined.unsqueeze(0),
+            )
+        unwrap(model).reset_mid_session_memory()
 
-            # Reset within-session memory ONCE for the whole sequence.
-            model.reset_mid_session_memory()
+        seq_total_loss_val = 0.0
+        seq_comps = {"dice": 0.0, "bce": 0.0, "change": 0.0}
 
-            seq_loss = None
-            seq_loss_components = {"dice": 0.0, "bce": 0.0, "change": 0.0}
-            n_in_seq = 0
+        for local_i, i in enumerate(range(window.start, window.stop)):
+            is_last = (local_i == n_steps_in_window - 1)
+            do_sync = is_last and is_sync_step
+            sync_ctx = (
+                contextlib.nullcontext()
+                if (do_sync or not isinstance(model, nn.parallel.DistributedDataParallel))
+                else model.no_sync()
+            )
 
-            for i in range(window.start, window.stop):
-                mid_slice = mid_images[i].unsqueeze(0)           # (1, 3, H, W)
-                pre_slice = pre_images[i].unsqueeze(0)           # (1, 3, H, W)
-                pgp = pre_gtvp[i].unsqueeze(0)
-                pgn = pre_gtvn[i].unsqueeze(0)
-                mgp = mid_gtvp[i].unsqueeze(0)
-                mgn = mid_gtvn[i].unsqueeze(0)
-                pm = pre_masks_combined[i].unsqueeze(0)
-                mm = mid_masks_combined[i].unsqueeze(0)
-                weeks_t = torch.tensor([weeks_scalar], dtype=torch.long, device=device)
+            pgp = pre_gtvp[i].unsqueeze(0)
+            pgn = pre_gtvn[i].unsqueeze(0)
+            mgp = mid_gtvp[i].unsqueeze(0)
+            mgn = mid_gtvn[i].unsqueeze(0)
+            pm  = pre_masks_combined[i].unsqueeze(0)
+            mm  = mid_masks_combined[i].unsqueeze(0)
+            weeks_t = torch.tensor([weeks_scalar], dtype=torch.long, device=device)
 
-                out = model(
-                    mid_images=mid_slice,
-                    M_pre=M_pre,
-                    pre_images=pre_slice,
-                    weeks_elapsed=weeks_t,
-                    pre_gtvp_mask=pgp,
-                    pre_gtvn_mask=pgn,
-                    return_change_map=True,
-                    detach_memory=False,           # keep gradients through the gate
-                )
+            with sync_ctx:
+                with autocast(enabled=cfg.training.amp):
+                    out = model(
+                        mid_images=mid_images[i].unsqueeze(0),
+                        M_pre=M_pre,
+                        pre_images=pre_images[i].unsqueeze(0),
+                        weeks_elapsed=weeks_t,
+                        pre_gtvp_mask=pgp,
+                        pre_gtvn_mask=pgn,
+                        return_change_map=True,
+                        detach_memory=False,
+                    )
+                    target_masks = _weighted_2ch_target(mgp, mgn)
+                    losses = _apply_channel_loss(
+                        loss_fn=loss_fn,
+                        pred_masks=out["masks"],
+                        target_masks=target_masks,
+                        change_logits=out.get("change_map"),
+                        pre_masks=pm,
+                        mid_masks=mm,
+                        gtvn_weight=gtvn_weight,
+                    )
+                    step_loss = losses["total"] / n_steps_in_window / accumulate
 
-                target_masks = _weighted_2ch_target(mgp, mgn)
-                losses = _apply_channel_loss(
-                    loss_fn=loss_fn,
-                    pred_masks=out["masks"],
-                    target_masks=target_masks,
-                    change_logits=out.get("change_map"),
-                    pre_masks=pm,
-                    mid_masks=mm,
-                    gtvn_weight=gtvn_weight,
-                )
+                scaler.scale(step_loss).backward(retain_graph=not is_last)
 
-                step_loss = losses["total"]
-                seq_loss = step_loss if seq_loss is None else seq_loss + step_loss
-                for k in seq_loss_components:
-                    v = losses.get(k, None)
-                    if v is not None:
-                        seq_loss_components[k] += v.item() if torch.is_tensor(v) else float(v)
-                n_in_seq += 1
+            seq_total_loss_val += losses["total"].item() / n_steps_in_window
+            for k in seq_comps:
+                v = losses.get(k, None)
+                if v is not None:
+                    seq_comps[k] += v.item() if torch.is_tensor(v) else float(v)
 
-            seq_loss = seq_loss / max(n_in_seq, 1)
-            loss = seq_loss / accumulate
-
-        scaler.scale(loss).backward()
-
-        if (step + 1) % accumulate == 0:
+        if is_sync_step:
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(
                 [p for g in optimizer.param_groups for p in g["params"]],
@@ -343,18 +382,19 @@ def train_sequence_epoch(
         if scheduler is not None:
             scheduler.step()
 
-        total_losses["total"] += seq_loss.item()
+        total_losses["total"] += seq_total_loss_val
         for k in ("dice", "bce", "change"):
-            total_losses[k] += seq_loss_components[k] / max(n_in_seq, 1)
+            total_losses[k] += seq_comps[k] / max(n_steps_in_window, 1)
         n_steps += 1
 
         pbar.set_postfix({
-            "loss": f"{seq_loss.item():.4f}",
-            "S": S,
+            "loss": f"{seq_total_loss_val:.4f}",
+            "S": n_steps_in_window,
             "lr": f"{optimizer.param_groups[0]['lr']:.2e}",
         })
 
-    return {k: v / max(n_steps, 1) for k, v in total_losses.items()}
+    result = {k: v / max(n_steps, 1) for k, v in total_losses.items()}
+    return {k: reduce_scalar(v, world_size) for k, v in result.items()}
 
 
 @torch.no_grad()
@@ -651,21 +691,19 @@ def main():
     if "gtvn_weight" not in cfg.loss:
         cfg.loss.gtvn_weight = 1.0
 
-    # Setup
-    set_seed(cfg.hardware.seed)
-    device = cfg.hardware.device
-    if device == "cuda" and not torch.cuda.is_available():
-        print("CUDA not available, falling back to CPU")
-        device = "cpu"
+    local_rank, rank, world_size = setup_ddp()
+    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
 
-    print("\n" + "=" * 60)
-    print("CSM-SAM Training")
-    print("=" * 60)
-    print(OmegaConf.to_yaml(cfg))
+    set_seed(cfg.hardware.seed, rank)
 
-    # W&B logging
+    if is_main(rank):
+        print("\n" + "=" * 60)
+        print(f"CSM-SAM HNTS-MRG Training  |  GPUs: {world_size}  |  rank 0/{world_size-1}")
+        print("=" * 60)
+        print(OmegaConf.to_yaml(cfg))
+
     wandb_run = None
-    if cfg.logging.use_wandb:
+    if cfg.logging.use_wandb and is_main(rank):
         try:
             import wandb
             wandb_run = wandb.init(
@@ -674,7 +712,7 @@ def main():
                 config=OmegaConf.to_container(cfg),
             )
         except ImportError:
-            print("wandb not installed, skipping")
+            pass
 
     # Build model
     print("\nBuilding model...")
@@ -699,17 +737,29 @@ def main():
         temporal_n_frequencies=temporal_n_frequencies,
     ).to(device)
 
-    # Print param counts
-    counts = model.count_trainable_params()
-    print(f"Trainable parameters:")
-    for name, count in counts.items():
-        print(f"  {name}: {count:,}")
+    if is_main(rank):
+        counts = model.count_trainable_params()
+        print("Trainable parameters:")
+        for name, count in counts.items():
+            print(f"  {name}: {count:,}")
 
-    # Build data
-    print("\nBuilding data loaders...")
+    if world_size > 1:
+        torch.cuda.empty_cache()
+        _orig_verify = dist._verify_params_across_processes
+        dist._verify_params_across_processes = lambda *a, **kw: None
+        model = nn.parallel.DistributedDataParallel(
+            model, device_ids=[local_rank], output_device=local_rank,
+            find_unused_parameters=True,
+            bucket_cap_mb=25,
+        )
+        dist._verify_params_across_processes = _orig_verify
+
+    if is_main(rank):
+        print("\nBuilding data loaders...")
     loaders = None
     if args.fold is not None:
-        print(f"  Using k-fold split: fold={args.fold} / {args.n_folds}")
+        if is_main(rank):
+            print(f"  Using k-fold split: fold={args.fold} / {args.n_folds}")
         loaders = _apply_kfold(cfg, args.fold, args.n_folds, cfg.hardware.seed)
 
     if loaders is None:
@@ -721,11 +771,20 @@ def main():
             pin_memory=cfg.data.pin_memory,
         )
 
-    # For sequence mode we need a volume-level train loader.
+    # For sequence mode we need a volume-level train loader with DistributedSampler.
     sequence_mode = bool(cfg.training.sequence_mode) and int(cfg.training.sequence_length) > 1
     if sequence_mode and "train_volumes" not in loaders:
-        print("  Building volume loader for sequence training...")
-        loaders["train_volumes"] = _build_train_volume_loader(cfg)
+        if is_main(rank):
+            print("  Building volume loader for sequence training...")
+        ds = HNTSMRGDataset(cfg.data.data_dir, split="train", image_size=cfg.data.image_size)
+        sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True) if world_size > 1 else None
+        loaders["train_volumes"] = DataLoader(
+            ds, batch_size=1,
+            sampler=sampler,
+            shuffle=(world_size == 1),
+            num_workers=cfg.data.num_workers,
+            pin_memory=cfg.data.pin_memory,
+        )
 
     # Build optimizer, scheduler, loss
     optimizer = build_optimizer(model, cfg)
@@ -751,73 +810,82 @@ def main():
         start_epoch += 1
         best_metric = prev_metrics.get(f"{cfg.evaluation.primary_metric}_mean", 0.0)
 
-    # Training loop
-    print(f"\nStarting training: epochs {start_epoch}-{cfg.training.epochs}")
-    print(f"Mode: {'sequence (S=' + str(cfg.training.sequence_length) + ')' if sequence_mode else 'single-slice'}")
-    print(f"Steps per epoch: {steps_per_epoch}")
-    print(f"Effective batch size: {cfg.data.batch_size * cfg.training.accumulate_grad_batches}")
-    print()
+    if is_main(rank):
+        eff_bs = cfg.data.batch_size * cfg.training.accumulate_grad_batches * world_size
+        print(f"\nStarting training: epochs {start_epoch}-{cfg.training.epochs}")
+        print(f"Mode: {'sequence (S=' + str(cfg.training.sequence_length) + ')' if sequence_mode else 'single-slice'}")
+        print(f"Steps per epoch: {steps_per_epoch}")
+        print(f"Effective batch size: {eff_bs}  ({world_size} GPU × {cfg.data.batch_size} × {cfg.training.accumulate_grad_batches} accum)")
+        print()
 
     metrics_history = []
 
     for epoch in range(start_epoch, cfg.training.epochs + 1):
+        if world_size > 1:
+            ldr = loaders["train_volumes"] if sequence_mode else loaders["train"]
+            if hasattr(ldr.sampler, "set_epoch"):
+                ldr.sampler.set_epoch(epoch)
+
         t0 = time.time()
 
-        # Train
         if sequence_mode:
             train_metrics = train_sequence_epoch(
                 model, loaders["train_volumes"], optimizer, scheduler,
-                loss_fn, scaler, device, cfg, epoch,
+                loss_fn, scaler, device, cfg, epoch, world_size=world_size,
             )
         else:
             train_metrics = train_one_epoch(
                 model, loaders["train"], optimizer, scheduler, loss_fn, scaler, device, cfg, epoch
             )
 
-        # Validate periodically
+        if world_size > 1:
+            dist.barrier()
+
         val_metrics = {}
         is_best = False
-        if epoch % cfg.evaluation.val_every_n_epochs == 0:
-            val_metrics = validate(model, loaders["val"], device, cfg)
+        if is_main(rank) and epoch % cfg.evaluation.val_every_n_epochs == 0:
+            val_metrics = validate(unwrap(model), loaders["val"], device, cfg)
             current = val_metrics.get(f"{cfg.evaluation.primary_metric}_mean", 0.0)
             is_best = current > best_metric
             if is_best:
                 best_metric = current
 
-        # Log
-        elapsed = time.time() - t0
-        log_str = (
-            f"Epoch {epoch:03d}/{cfg.training.epochs} | "
-            f"loss={train_metrics['total']:.4f} dice={train_metrics['dice']:.4f}"
-        )
-        if val_metrics:
-            agg = val_metrics.get("agg_dsc_mean", 0)
-            log_str += f" | val_aggDSC={agg:.4f} (best={best_metric:.4f})"
-        log_str += f" | {elapsed:.1f}s"
-        print(log_str)
+        if is_main(rank):
+            elapsed = time.time() - t0
+            log_str = (
+                f"Epoch {epoch:03d}/{cfg.training.epochs} | "
+                f"loss={train_metrics['total']:.4f} dice={train_metrics['dice']:.4f}"
+            )
+            if val_metrics:
+                agg = val_metrics.get("agg_dsc_mean", 0)
+                log_str += f" | val_aggDSC={agg:.4f} (best={best_metric:.4f})"
+            log_str += f" | {elapsed:.1f}s"
+            print(log_str)
 
-        # Save
-        save_checkpoint(model, optimizer, scheduler, epoch, val_metrics, cfg, is_best)
+            save_checkpoint(unwrap(model), optimizer, scheduler, epoch, val_metrics, cfg, is_best)
 
+            if wandb_run:
+                log_dict = {f"train/{k}": v for k, v in train_metrics.items()}
+                log_dict.update({f"val/{k}": v for k, v in val_metrics.items()})
+                log_dict["epoch"] = epoch
+                wandb_run.log(log_dict)
+
+            metrics_history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
+
+        if world_size > 1:
+            dist.barrier()
+
+    if is_main(rank):
+        out_dir = Path(cfg.checkpoint.output_dir)
+        with open(out_dir / "training_history.json", "w") as f:
+            json.dump(metrics_history, f, indent=2)
+        print(f"\nTraining complete. Best {cfg.evaluation.primary_metric}: {best_metric:.4f}")
+        print(f"Best model: {out_dir}/best.pth")
+        print(f"\nNext step: python test.py --checkpoint {out_dir}/best.pth")
         if wandb_run:
-            log_dict = {f"train/{k}": v for k, v in train_metrics.items()}
-            log_dict.update({f"val/{k}": v for k, v in val_metrics.items()})
-            log_dict["epoch"] = epoch
-            wandb_run.log(log_dict)
+            wandb_run.finish()
 
-        metrics_history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
-
-    # Save full metrics history
-    out_dir = Path(cfg.checkpoint.output_dir)
-    with open(out_dir / "training_history.json", "w") as f:
-        json.dump(metrics_history, f, indent=2)
-
-    print(f"\nTraining complete. Best {cfg.evaluation.primary_metric}: {best_metric:.4f}")
-    print(f"Best model: {out_dir}/best.pth")
-    print(f"\nNext step: python test.py --checkpoint {out_dir}/best.pth")
-
-    if wandb_run:
-        wandb_run.finish()
+    cleanup_ddp()
 
 
 if __name__ == "__main__":
