@@ -67,11 +67,11 @@ class ChangeHead(nn.Module):
         self.head = nn.Sequential(
             # Fuse pre-RT and mid-RT features
             nn.Conv2d(in_channels * 2, in_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(in_channels),
+            nn.GroupNorm(min(32, in_channels), in_channels),
             nn.ReLU(inplace=False),
             # Reduce
             nn.Conv2d(in_channels, mid, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(mid),
+            nn.GroupNorm(min(32, mid), mid),
             nn.ReLU(inplace=False),
             # Classify
             nn.Conv2d(mid, num_classes, kernel_size=1),
@@ -83,7 +83,7 @@ class ChangeHead(nn.Module):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, nn.BatchNorm2d):
+            elif isinstance(m, nn.GroupNorm):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 

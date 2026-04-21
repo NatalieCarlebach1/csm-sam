@@ -84,13 +84,19 @@ def load_nifti(path: str | Path) -> np.ndarray:
 
 def normalize_mri(volume: np.ndarray, percentile_low: float = 1.0, percentile_high: float = 99.0) -> np.ndarray:
     """
-    Percentile-based normalization for T2-weighted MRI.
-    Clips to [p1, p99] then scales to [0, 1].
+    Z-score normalization over foreground (non-zero) voxels, then clip to [0, 1].
+    Matches SOTA BraTS/HNTS-MRG preprocessing (nnU-Net, MedNeXt, SwinUNETR all use
+    per-modality z-score within the brain mask, not global percentile scaling).
     """
-    p_low = np.percentile(volume, percentile_low)
-    p_high = np.percentile(volume, percentile_high)
-    volume = np.clip(volume, p_low, p_high)
-    volume = (volume - p_low) / (p_high - p_low + 1e-8)
+    foreground = volume[volume > 0]
+    if foreground.size == 0:
+        return volume.astype(np.float32)
+    mean = foreground.mean()
+    std = foreground.std() + 1e-8
+    volume = (volume - mean) / std
+    # Clip outliers (covers >99.9% of brain signal) then scale to [0, 1]
+    volume = np.clip(volume, -5.0, 5.0)
+    volume = (volume + 5.0) / 10.0
     return volume.astype(np.float32)
 
 
