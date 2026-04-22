@@ -34,7 +34,7 @@ training:
   scheduler: "cosine"                 # "cosine" | "step" | "plateau"
   gradient_clip_norm: 1.0
   amp: true                           # automatic mixed precision
-  accumulate_grad_batches: 4          # effective batch size = batch_size * accumulate
+  accumulate_grad_batches: 1          # eff_bs = 16 (bs) × 4 (GPUs) = 64 — no extra accum needed
   sequence_length: 4                  # number of consecutive mid-RT slices per training step; 1 = single-slice
   sequence_mode: true                 # enable sequence training
 

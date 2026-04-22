@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=csmsam-hnts-1024
+#SBATCH --job-name=csmsam-bplus-4gpu
 #SBATCH --partition=dgx
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
@@ -20,8 +20,8 @@ cd /home/nfs/tals/csm-sam
 # ── Config knobs (SOTA: SAM2-L @ 1024) ────────────────────────────────────────
 CONFIG=configs/default.yaml
 DATA_DIR=/home/nfs/tals/csm-sam/data/processed
-SAM2_CKPT=/home/nfs/tals/csm-sam/checkpoints/sam2/sam2.1_hiera_large.pt
-OUTPUT_DIR=/home/nfs/tals/csm-sam/checkpoints/csmsam_hnts_1024_${SLURM_JOB_ID}
+SAM2_CKPT=/home/nfs/tals/csm-sam/checkpoints/sam2/sam2.1_hiera_base_plus.pt
+OUTPUT_DIR=/home/nfs/tals/csm-sam/checkpoints/csmsam_bplus_4gpu_${SLURM_JOB_ID}
 NPROC=4                                   # matches --gres=gpu:4
 
 mkdir -p "$OUTPUT_DIR"
@@ -53,7 +53,7 @@ torchrun \
     --data_dir "$DATA_DIR" \
     --sam2_checkpoint "$SAM2_CKPT" \
     --output_dir "$OUTPUT_DIR" \
-    --sequence_train \
+    --no_sequence_train \
     --no_wandb
 
 echo ""
