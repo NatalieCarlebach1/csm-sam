@@ -63,12 +63,14 @@ class CSMSAM(nn.Module):
         retrieval_k: int = 5,
         retrieval_n_tokens: int = 16,
         retrieval_gate_init: float = 0.0,
+        prompt_dropout: float = 0.3,
     ):
         super().__init__()
         self.sam2 = sam2_model
         self.memory_bank_max_slices = memory_bank_max_slices
         self.use_cross_patient_retrieval = use_cross_patient_retrieval
         self.retrieval_n_tokens = retrieval_n_tokens
+        self.prompt_dropout = prompt_dropout
 
         # Novel modules (trainable)
         self.memory_encoder = CrossSessionMemoryEncoder(
@@ -418,7 +420,15 @@ class CSMSAM(nn.Module):
         point_coords = None
         point_labels = None
 
-        if prior_mask is not None and prior_mask.sum() > 0:
+        # Training-only prompt dropout: 30% of the time we drop the pre-RT mask
+        # prompt to force the cross-session attention / retrieval path to carry
+        # the segmentation rather than copying the prior.
+        use_mask_prompt = True
+        if self.training and prior_mask is not None and prior_mask.sum() > 0:
+            if torch.rand(1, device=device).item() < self.prompt_dropout:
+                use_mask_prompt = False
+
+        if use_mask_prompt and prior_mask is not None and prior_mask.sum() > 0:
             # Down-sample mask to SAM2 low-res prompt resolution.
             low_res_mask_prompt = F.interpolate(
                 prior_mask.float(), size=(256, 256), mode="bilinear", align_corners=False
@@ -426,7 +436,7 @@ class CSMSAM(nn.Module):
             # Also compute a centroid point per batch element as a backup prompt.
             point_coords, point_labels = self._mask_to_centroid_points(prior_mask, (H, W))
         else:
-            # Empty prior mask: fall back to peak-activation point.
+            # Empty prior mask (or dropped): fall back to peak-activation point.
             point_coords, point_labels = self._activation_peak_points(image_features, (H, W))
 
         low_res_masks = None
@@ -441,11 +451,17 @@ class CSMSAM(nn.Module):
                 image_pe=self.sam2.sam_prompt_encoder.get_dense_pe(),
                 sparse_prompt_embeddings=sparse_embed,
                 dense_prompt_embeddings=dense_embed,
-                multimask_output=False,
+                multimask_output=True,
                 repeat_image=False,
                 high_res_features=high_res_features,
             )
-            low_res_masks = decoder_out[0]  # SAM2 returns (masks, iou, sam_tokens, object_score_logits)
+            # SAM2 returns (masks, iou_pred, sam_tokens, object_score_logits).
+            # With multimask_output=True, masks is (B, 3, h, w) and iou_pred is (B, 3);
+            # select the highest-IoU candidate per batch element.
+            all_masks, iou_pred = decoder_out[0], decoder_out[1]
+            best = iou_pred.argmax(dim=1)                       # (B,)
+            idx = best.view(-1, 1, 1, 1).expand(-1, 1, all_masks.shape[-2], all_masks.shape[-1])
+            low_res_masks = all_masks.gather(1, idx)            # (B, 1, h, w)
         except Exception as e:
             import traceback, warnings
             warnings.warn(f"SAM2 decoder failed ({e}), using fallback", stacklevel=2)
@@ -563,11 +579,15 @@ class CSMSAM(nn.Module):
         if self.retrieval is not None:
             novel_params += list(self.retrieval.parameters())
 
+        # Unfreeze the full SAM2 mask decoder (transformer + final layers) at
+        # a 10x-smaller LR. Keeping only output_upscaling+hypernetworks trainable
+        # was bottlenecking learning — the transformer is where mask-prompt vs
+        # image-feature integration happens, so it needs plasticity too.
         decoder_params = []
         if hasattr(self.sam2, "sam_mask_decoder"):
-            for name, p in self.sam2.sam_mask_decoder.named_parameters():
-                if "output_upscaling" in name or "output_hypernetworks" in name:
-                    decoder_params.append(p)
+            for p in self.sam2.sam_mask_decoder.parameters():
+                p.requires_grad = True
+                decoder_params.append(p)
 
         return [
             {"params": novel_params, "lr_scale": 1.0},
