@@ -51,7 +51,8 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+import torch.distributed as dist
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 try:
     import SimpleITK as sitk
@@ -816,10 +817,17 @@ def build_dataloaders(
     val_ds = HNTSMRGDataset(data_dir, split="val", image_size=image_size)
     test_ds = HNTSMRGDataset(data_dir, split="test", image_size=image_size)
 
+    # When DDP is active, shard the train split across ranks so each GPU sees
+    # a different 1/world_size of the data — otherwise every rank iterates the
+    # full dataset (wasted compute) and wall-time per epoch doesn't scale with
+    # GPU count.
+    ddp_active = dist.is_available() and dist.is_initialized()
+    train_sampler = DistributedSampler(train_ds, shuffle=True, drop_last=True) if ddp_active else None
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=True,
