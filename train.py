@@ -440,14 +440,17 @@ def validate(
     patient_metrics = []
 
     for batch in tqdm(loader, desc="Validating", leave=False):
-        # Volume-level batch (B=1 from val loader)
-        pre_images = batch["pre_images"].squeeze(0).to(device)       # (N, 3, H, W)
-        mid_images = batch["mid_images"].squeeze(0).to(device)       # (N, 3, H, W)
-        pre_masks = batch["pre_masks"].squeeze(0).to(device)         # (N, 1, H, W) combined
-        pre_gtvp = batch["pre_masks_gtvp"].squeeze(0).to(device)     # (N, 1, H, W)
-        pre_gtvn = batch["pre_masks_gtvn"].squeeze(0).to(device)     # (N, 1, H, W)
-        mid_masks_gtvp = batch["mid_masks_gtvp"].squeeze(0)          # (N, 1, H, W)
-        mid_masks_gtvn = batch["mid_masks_gtvn"].squeeze(0)          # (N, 1, H, W)
+        # Volume-level batch (B=1 from val loader).
+        # SOTA-aligned: use registered pre-RT image + masks (on mid-RT grid)
+        # to match the training-time signal. All top-5 HNTS-MRG 2024 teams
+        # consume these.
+        mid_images = batch["mid_images"].squeeze(0).to(device)              # (N, 3, H, W)
+        pre_images = batch["pre_images_registered"].squeeze(0).to(device)   # (N, 3, H, W) on mid grid
+        pre_masks  = batch["pre_mask_registered"].squeeze(0).to(device)     # (N, 1, H, W) combined
+        pre_gtvp   = batch["pre_mask_registered_gtvp"].squeeze(0).to(device) # (N, 1, H, W)
+        pre_gtvn   = batch["pre_mask_registered_gtvn"].squeeze(0).to(device) # (N, 1, H, W)
+        mid_masks_gtvp = batch["mid_masks_gtvp"].squeeze(0)                 # (N, 1, H, W)
+        mid_masks_gtvn = batch["mid_masks_gtvn"].squeeze(0)                 # (N, 1, H, W)
 
         weeks = batch["weeks_elapsed"]
         if isinstance(weeks, (list, tuple)):

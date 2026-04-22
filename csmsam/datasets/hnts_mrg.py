@@ -328,6 +328,7 @@ class HNTSMRGDataset(Dataset):
         pre_gtvn = data["pre_gtvn"][:N]
         mid_gtvp = data["mid_gtvp"][:N]
         mid_gtvn = data["mid_gtvn"][:N]
+        pre_vol_reg = data["pre_vol_registered"][:N]
         pre_gtvp_reg = data["pre_gtvp_registered"][:N]
         pre_gtvn_reg = data["pre_gtvn_registered"][:N]
 
@@ -340,6 +341,7 @@ class HNTSMRGDataset(Dataset):
         mid_masks_gtvn = torch.stack([to_mask_tensor(mid_gtvn[i], self.image_size) for i in range(N)])
         pre_mask_reg_gtvp = torch.stack([to_mask_tensor(pre_gtvp_reg[i], self.image_size) for i in range(N)])
         pre_mask_reg_gtvn = torch.stack([to_mask_tensor(pre_gtvn_reg[i], self.image_size) for i in range(N)])
+        pre_images_registered = torch.stack([to_rgb_tensor(pre_vol_reg[i], self.image_size) for i in range(N)])
 
         return {
             "pre_images": pre_images,                              # (N, 3, H, W)
@@ -350,11 +352,12 @@ class HNTSMRGDataset(Dataset):
             "pre_masks_gtvn": pre_masks_gtvn,
             "mid_masks_gtvp": mid_masks_gtvp,
             "mid_masks_gtvn": mid_masks_gtvn,
-            # Pre-RT masks warped onto the mid-RT grid (HNTS-MRG SOTA input).
-            # All zero when *_registered.nii.gz files are absent — TODO:
-            # data/preprocess.py currently does not produce these files, so
-            # these tensors will be zero on the shipping data and must be
-            # filled in before attempting to reproduce UW-LAIR / BAMF numbers.
+            # Pre-RT image + masks warped onto the mid-RT grid — the SOTA
+            # input used by all HNTS-MRG 2024 top-5 teams (UW LAIR 0.733,
+            # mic-dkfz 0.727, HiLab 0.725). Tensors are zero if the
+            # organiser-supplied *_registered.nii.gz files are absent for a
+            # patient. data/preprocess.py passes them through from raw.
+            "pre_images_registered": pre_images_registered,
             "pre_mask_registered": (pre_mask_reg_gtvp + pre_mask_reg_gtvn).clamp(0, 1),
             "pre_mask_registered_gtvp": pre_mask_reg_gtvp,
             "pre_mask_registered_gtvn": pre_mask_reg_gtvn,
