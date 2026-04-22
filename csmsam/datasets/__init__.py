@@ -5,12 +5,37 @@ from .hnts_mrg import (
     build_dataloaders,
 )
 from .brats_gli import BraTSGLIDataset, BraTSGLISliceDataset
-from .levir_cd import LEVIRCDDataset
-from .s2looking import S2LookingDataset
-from .second import SECONDDataset
-from .xbd import XBDDataset
-from .oaizib_cm import OAIZIBDataset, OAIZIBSliceDataset
-from .ms_segmentation import MSSegmentationDataset
+
+try:
+    from .levir_cd import LEVIRCDDataset
+except ImportError:
+    LEVIRCDDataset = None  # type: ignore[assignment,misc]
+
+try:
+    from .s2looking import S2LookingDataset
+except ImportError:
+    S2LookingDataset = None  # type: ignore[assignment,misc]
+
+try:
+    from .second import SECONDDataset
+except ImportError:
+    SECONDDataset = None  # type: ignore[assignment,misc]
+
+try:
+    from .xbd import XBDDataset
+except ImportError:
+    XBDDataset = None  # type: ignore[assignment,misc]
+
+try:
+    from .oaizib_cm import OAIZIBDataset, OAIZIBSliceDataset
+except ImportError:
+    OAIZIBDataset = None  # type: ignore[assignment,misc]
+    OAIZIBSliceDataset = None  # type: ignore[assignment,misc]
+
+try:
+    from .ms_segmentation import MSSegmentationDataset
+except ImportError:
+    MSSegmentationDataset = None  # type: ignore[assignment,misc]
 
 __all__ = [
     "HNTSMRGDataset",

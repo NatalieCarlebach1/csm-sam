@@ -277,6 +277,7 @@ def train_sequence_epoch(model, volume_loader, optimizer, scheduler, loss_fn,
     accum       = cfg.training.accumulate_grad_batches
     seq_len     = max(1, int(cfg.training.sequence_length))
     rank = dist.get_rank() if dist.is_initialized() else 0
+    _grad_norms_last = {}
 
     optimizer.zero_grad()
     pbar = tqdm(volume_loader, desc=f"Epoch {epoch} [seq]", leave=False, disable=not is_main(rank))
@@ -381,6 +382,13 @@ def train_sequence_epoch(model, volume_loader, optimizer, scheduler, loss_fn,
 
                 scaler.scale(step_loss).backward(retain_graph=not is_last)
 
+            # Detach _M_mid after each backward to prevent gradient double-counting
+            # through within-session memory. retain_graph=not is_last is still
+            # required to keep M_pre's graph alive for subsequent slice forwards.
+            _m = unwrap(model)
+            if _m._M_mid is not None:
+                _m._M_mid = _m._M_mid.detach()
+
             seq_total_loss_val += losses["total"].item() / n_steps_in_window
             for k in seq_comps:
                 v = losses.get(k, None)
@@ -394,6 +402,11 @@ def train_sequence_epoch(model, volume_loader, optimizer, scheduler, loss_fn,
                 [p for g in optimizer.param_groups for p in g["params"]],
                 cfg.training.gradient_clip_norm,
             )
+            for name, module in unwrap(model).named_children():
+                norm = sum(p.grad.detach().norm().item() ** 2
+                           for p in module.parameters() if p.grad is not None) ** 0.5
+                if norm > 0:
+                    _grad_norms_last[name] = norm
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
@@ -413,7 +426,9 @@ def train_sequence_epoch(model, volume_loader, optimizer, scheduler, loss_fn,
         })
 
     result = {k: v / max(n_steps, 1) for k, v in totals.items()}
-    return {k: reduce_scalar(v, world_size) for k, v in result.items()}
+    result["_grad_norms"] = _grad_norms_last
+    return {k: reduce_scalar(v, world_size) if k != "_grad_norms" else v
+            for k, v in result.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -785,6 +800,12 @@ def main():
                 )
             log_str += f" | {elapsed:.1f}s"
             print(log_str)
+
+            if True:  # log grad norms every epoch
+                grad_info = train_metrics.get("_grad_norms", {})
+                if grad_info:
+                    grad_str = "  grad norms: " + " ".join(f"{k}={v:.3e}" for k, v in grad_info.items())
+                    print(grad_str)
 
             save_checkpoint(model, optimizer, scheduler, epoch, val_metrics, cfg, is_best)
 

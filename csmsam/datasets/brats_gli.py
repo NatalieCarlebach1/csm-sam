@@ -466,8 +466,6 @@ class BraTSGLISliceDataset(Dataset):
         n_folds: int = 1,
         fold: int = 0,
     ):
-        n_folds: int = 1,
-        fold: int = 0,
         if modality not in VALID_MODALITIES:
             raise ValueError(f"modality must be one of {VALID_MODALITIES}, got {modality!r}")
 

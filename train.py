@@ -257,9 +257,9 @@ def train_sequence_epoch(
     For each patient volume:
       - Encode pre-RT memory once (subsampled slices only, no_grad).
       - Sample S consecutive mid-RT slices.
-      - Reset M_mid, then forward + backward one slice at a time (TBPTT).
-        retain_graph=True for all but the last slice so the graph doesn't
-        accumulate across the full sequence (avoids OOM on long sequences).
+      - Reset M_mid, then forward + backward one slice at a time.
+        retain_graph=True keeps M_pre's graph alive across steps; _M_mid is
+        detached after each backward to stop double-counting through it.
     """
     model.train()
     # BN layers must stay in eval during sequence training — in-place updates
@@ -362,6 +362,13 @@ def train_sequence_epoch(
                     step_loss = losses["total"] / n_steps_in_window / accumulate
 
                 scaler.scale(step_loss).backward(retain_graph=not is_last)
+
+            # Detach _M_mid after each backward to prevent gradient double-counting
+            # through within-session memory. retain_graph=not is_last is still
+            # required to keep M_pre's graph alive for subsequent slice forwards.
+            _m = unwrap(model)
+            if _m._M_mid is not None:
+                _m._M_mid = _m._M_mid.detach()
 
             seq_total_loss_val += losses["total"].item() / n_steps_in_window
             for k in seq_comps:

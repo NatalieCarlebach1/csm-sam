@@ -21,6 +21,15 @@ from csmsam.modeling.change_head import ChangeMapLoss, build_change_labels
 from csmsam.losses.consistency import FeatureConsistencyLoss
 
 
+def _batch_pos_weight(targets: torch.Tensor, cap: float = 20.0) -> torch.Tensor:
+    """Per-channel bg/fg pixel ratio for BCE pos_weight, capped to avoid instability."""
+    B, C, H, W = targets.shape
+    flat = targets.reshape(B, C, -1)
+    n_pos = flat.sum(dim=(0, 2)).clamp_min(1.0)
+    n_neg = (1.0 - flat).sum(dim=(0, 2)).clamp_min(1.0)
+    return (n_neg / n_pos).clamp_max(cap)
+
+
 class DiceLoss(nn.Module):
     """
     Soft Dice loss for binary segmentation.
@@ -200,15 +209,17 @@ class CombinedLoss(nn.Module):
             # Weighted sum over channels: GTVp has implicit weight 1.0
             l_dice = dice_gtvp + self.gtvn_weight * dice_gtvn
 
-            # Per-channel BCE, weighted
+            # Per-channel BCE with dynamic pos_weight for class imbalance
+            pw = _batch_pos_weight(target_seg).view(1, C_pred, 1, 1)
             bce_per_ch = F.binary_cross_entropy_with_logits(
-                pred_masks, target_seg, reduction="none"
+                pred_masks, target_seg, pos_weight=pw, reduction="none"
             ).mean(dim=(0, 2, 3))  # (2,)
             l_bce = bce_per_ch[0] + self.gtvn_weight * bce_per_ch[1]
         else:
-            # Single-channel path (legacy)
+            # Single-channel path
             l_dice = self.dice_loss(pred_masks, target_seg)
-            l_bce = F.binary_cross_entropy_with_logits(pred_masks, target_seg)
+            pw = _batch_pos_weight(target_seg).view(1, 1, 1, 1)
+            l_bce = F.binary_cross_entropy_with_logits(pred_masks, target_seg, pos_weight=pw)
 
         total = self.lambda_dice * l_dice + self.lambda_bce * l_bce
 
