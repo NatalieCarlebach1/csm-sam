@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=512G
+#SBATCH --mem=1000G
 #SBATCH --time=3-00:00:00
 #SBATCH --output=/home/nfs/tals/csm-sam/logs/csmsam_%j.out
 #SBATCH --error=/home/nfs/tals/csm-sam/logs/csmsam_%j.err
