@@ -63,7 +63,7 @@ class CSMSAM(nn.Module):
         retrieval_k: int = 5,
         retrieval_n_tokens: int = 16,
         retrieval_gate_init: float = 0.0,
-        prompt_dropout: float = 0.3,
+        prompt_dropout: float = 0.0,
     ):
         super().__init__()
         self.sam2 = sam2_model

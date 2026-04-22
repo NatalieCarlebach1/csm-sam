@@ -27,10 +27,10 @@ model:
 # ─── Training ────────────────────────────────────────────────────────────────
 training:
   epochs: 200
-  lr: 3e-4                            # learning rate for novel modules (standard seg-training LR)
-  lr_decoder: 3e-5                    # learning rate for SAM2 decoder (lr * 0.1 scale)
+  lr: 2e-4                            # novel modules LR — conservative with decoder now trainable
+  lr_decoder: 2e-5                    # SAM2 decoder LR (lr * 0.1 scale)
   weight_decay: 0.01
-  warmup_epochs: 0                    # no warmup — straight to full LR
+  warmup_epochs: 5                    # short warmup — lets newly-unfrozen decoder settle
   scheduler: "cosine"                 # "cosine" | "step" | "plateau"
   gradient_clip_norm: 1.0
   amp: true                           # automatic mixed precision
