@@ -170,13 +170,20 @@ def train_one_epoch(
 
     for step, batch in enumerate(pbar):
         mid_images = batch["mid_image"].to(device)                 # (B, 3, H, W)
-        pre_images = batch["pre_image"].to(device)                 # (B, 3, H, W)
-        mid_masks = batch["mid_mask"].to(device)                   # (B, 1, H, W) combined
-        pre_masks = batch["pre_mask"].to(device)                   # (B, 1, H, W) combined
+        mid_masks  = batch["mid_mask"].to(device)                  # (B, 1, H, W) combined
         mid_masks_gtvp = batch["mid_mask_gtvp"].to(device)         # (B, 1, H, W)
         mid_masks_gtvn = batch["mid_mask_gtvn"].to(device)         # (B, 1, H, W)
-        pre_masks_gtvp = batch["pre_mask_gtvp"].to(device)         # (B, 1, H, W)
-        pre_masks_gtvn = batch["pre_mask_gtvn"].to(device)         # (B, 1, H, W)
+
+        # SOTA-aligned inputs: HNTS-MRG 2024 top-5 teams (UW LAIR 0.733,
+        # mic-dkfz 0.727, HiLab 0.725) all consume the organiser-supplied
+        # deformably-registered pre-RT files (on the mid-RT grid) as the
+        # primary pre-RT signal. Using these here means the SAM2 mask prompt
+        # spatially aligns with the mid-RT tumor location instead of pointing
+        # at an unregistered slice.
+        pre_images     = batch["pre_image_registered"].to(device)       # (B, 3, H, W) on mid grid
+        pre_masks      = batch["pre_mask_registered"].to(device)        # (B, 1, H, W) combined
+        pre_masks_gtvp = batch["pre_mask_gtvp_registered"].to(device)   # (B, 1, H, W)
+        pre_masks_gtvn = batch["pre_mask_gtvn_registered"].to(device)   # (B, 1, H, W)
         weeks = batch["weeks_elapsed"]
 
         if isinstance(weeks, list):

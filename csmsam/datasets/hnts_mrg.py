@@ -171,11 +171,20 @@ class _VolumeCache:
         mid_gtvp = _load_mask("mid_GTVp.nii.gz", mid_vol)
         mid_gtvn = _load_mask("mid_GTVn.nii.gz", mid_vol)
 
-        # Registered pre-RT masks on the mid-RT grid (HNTS-MRG SOTA input).
-        # Shape follows mid_vol. Zero when file is absent, so downstream code
-        # can always consume the tensor without branching.
+        # Registered pre-RT masks + image on the mid-RT grid — this is the
+        # single biggest input signal that all HNTS-MRG 2024 top-5 teams use.
+        # UW LAIR (0.733, #1) feeds the registered masks as auxiliary channels
+        # into a mask-aware attention module; mic-dkfz (0.727, #2) and HiLab
+        # (0.725, #3) concat them as extra nnU-Net input channels. We expose
+        # them here so the SAM2 mask-prompt path can consume them too.
+        # Shape follows mid_vol. Zero when file is absent.
         pre_gtvp_reg = _load_mask("pre_GTVp_registered.nii.gz", mid_vol)
         pre_gtvn_reg = _load_mask("pre_GTVn_registered.nii.gz", mid_vol)
+        pre_vol_reg_path = patient_dir / "pre_image_registered.nii.gz"
+        if pre_vol_reg_path.exists():
+            pre_vol_reg = normalize_mri(load_nifti(pre_vol_reg_path))
+        else:
+            pre_vol_reg = np.zeros_like(mid_vol)
 
         meta_path = patient_dir / "metadata.json"
         weeks_elapsed = 3
@@ -190,6 +199,7 @@ class _VolumeCache:
             "pre_gtvn": pre_gtvn,
             "mid_gtvp": mid_gtvp,
             "mid_gtvn": mid_gtvn,
+            "pre_vol_registered": pre_vol_reg,
             "pre_gtvp_registered": pre_gtvp_reg,
             "pre_gtvn_registered": pre_gtvn_reg,
             "weeks_elapsed": weeks_elapsed,
@@ -269,9 +279,14 @@ class HNTSMRGDataset(Dataset):
         pre_gtvn = load_nifti(patient_dir / "pre_GTVn.nii.gz") if (patient_dir / "pre_GTVn.nii.gz").exists() else np.zeros_like(pre_vol)
         mid_gtvp = load_nifti(patient_dir / "mid_GTVp.nii.gz") if (patient_dir / "mid_GTVp.nii.gz").exists() else np.zeros_like(mid_vol)
         mid_gtvn = load_nifti(patient_dir / "mid_GTVn.nii.gz") if (patient_dir / "mid_GTVn.nii.gz").exists() else np.zeros_like(mid_vol)
-        # Registered pre-RT masks (on mid-RT grid). SOTA input.
+        # Registered pre-RT image + masks (on mid-RT grid). SOTA input.
         pre_gtvp_reg = load_nifti(patient_dir / "pre_GTVp_registered.nii.gz") if (patient_dir / "pre_GTVp_registered.nii.gz").exists() else np.zeros_like(mid_vol)
         pre_gtvn_reg = load_nifti(patient_dir / "pre_GTVn_registered.nii.gz") if (patient_dir / "pre_GTVn_registered.nii.gz").exists() else np.zeros_like(mid_vol)
+        pre_vol_reg_path = patient_dir / "pre_image_registered.nii.gz"
+        pre_vol_reg = (
+            normalize_mri(load_nifti(pre_vol_reg_path))
+            if pre_vol_reg_path.exists() else np.zeros_like(mid_vol)
+        )
 
         pre_vol = normalize_mri(pre_vol)
         mid_vol = normalize_mri(mid_vol)
@@ -291,6 +306,7 @@ class HNTSMRGDataset(Dataset):
             "pre_gtvn": pre_gtvn,
             "mid_gtvp": mid_gtvp,
             "mid_gtvn": mid_gtvn,
+            "pre_vol_registered": pre_vol_reg,
             "pre_gtvp_registered": pre_gtvp_reg,
             "pre_gtvn_registered": pre_gtvn_reg,
             "weeks_elapsed": weeks_elapsed,
@@ -446,41 +462,132 @@ class HNTSMRGSliceDataset(Dataset):
         pre_gtvn_vol = data["pre_gtvn"]
         mid_gtvp_vol = data["mid_gtvp"]
         mid_gtvn_vol = data["mid_gtvn"]
+        # Registered pre-RT volume + masks on the mid-RT grid (SOTA signal).
+        pre_vol_reg = data["pre_vol_registered"]
+        pre_gtvp_reg_vol = data["pre_gtvp_registered"]
+        pre_gtvn_reg_vol = data["pre_gtvn_registered"]
 
-        # Clamp slice index to valid range
-        N = min(pre_vol.shape[0], mid_vol.shape[0])
-        slice_idx = min(slice_idx, N - 1)
+        # Clamp slice index to valid range. slice_idx comes from mid-RT
+        # enumeration (see tumor_slices / bg_slices build loop), so it is
+        # already a mid-RT index. Clamp pre_vol separately — unregistered
+        # pre-RT may have a different slice count.
+        N_mid = mid_vol.shape[0]
+        slice_idx = min(slice_idx, N_mid - 1)
+        pre_idx_legacy = min(slice_idx, pre_vol.shape[0] - 1)
 
-        pre_slice = pre_vol[slice_idx]   # (H, W)
+        # Unregistered pre-RT slice (legacy — kept for backward compat).
+        pre_slice = pre_vol[pre_idx_legacy]
+        pre_gtvp_sl = pre_gtvp_vol[pre_idx_legacy] > 0
+        pre_gtvn_sl = pre_gtvn_vol[pre_idx_legacy] > 0
+
+        # Mid-RT slice + per-structure targets.
         mid_slice = mid_vol[slice_idx]
-        pre_mask = (pre_gtvp_vol[slice_idx] + pre_gtvn_vol[slice_idx]) > 0
-        mid_mask = (mid_gtvp_vol[slice_idx] + mid_gtvn_vol[slice_idx]) > 0
-        pre_gtvp_sl = pre_gtvp_vol[slice_idx] > 0
-        pre_gtvn_sl = pre_gtvn_vol[slice_idx] > 0
         mid_gtvp_sl = mid_gtvp_vol[slice_idx] > 0
         mid_gtvn_sl = mid_gtvn_vol[slice_idx] > 0
 
-        # Augmentation
+        # Registered pre-RT image + masks, same slice index as mid (same grid).
+        pre_slice_reg = pre_vol_reg[slice_idx]
+        pre_gtvp_reg_sl = pre_gtvp_reg_vol[slice_idx] > 0
+        pre_gtvn_reg_sl = pre_gtvn_reg_vol[slice_idx] > 0
+
+        # Combined masks
+        pre_mask = (pre_gtvp_vol[pre_idx_legacy] + pre_gtvn_vol[pre_idx_legacy]) > 0
+        mid_mask = (mid_gtvp_vol[slice_idx] + mid_gtvn_vol[slice_idx]) > 0
+
+        # Augmentation — flip/noise applied consistently to ALL spatially-
+        # aligned slices. Mid and pre_registered share the mid-RT grid, so
+        # they receive the same transform. Legacy pre-RT (on its own grid)
+        # gets a separate flip of its own since it is not spatially aligned
+        # with the mid frame anyway.
         if self.augment:
-            pre_slice, mid_slice, pre_mask, mid_mask = self._augment(
-                pre_slice, mid_slice, pre_mask.astype(np.float32), mid_mask.astype(np.float32)
+            (mid_slice, pre_slice_reg,
+             pre_gtvp_reg_sl_f, pre_gtvn_reg_sl_f,
+             mid_gtvp_sl_f, mid_gtvn_sl_f,
+             mid_mask_f) = self._augment_aligned(
+                mid_slice, pre_slice_reg,
+                pre_gtvp_reg_sl.astype(np.float32), pre_gtvn_reg_sl.astype(np.float32),
+                mid_gtvp_sl.astype(np.float32), mid_gtvn_sl.astype(np.float32),
+                mid_mask.astype(np.float32),
+            )
+            pre_gtvp_reg_sl = pre_gtvp_reg_sl_f > 0.5
+            pre_gtvn_reg_sl = pre_gtvn_reg_sl_f > 0.5
+            mid_gtvp_sl = mid_gtvp_sl_f > 0.5
+            mid_gtvn_sl = mid_gtvn_sl_f > 0.5
+            mid_mask = mid_mask_f > 0.5
+            # legacy unregistered pre-RT (separate transform — different grid)
+            pre_slice, pre_mask = self._augment_pair(
+                pre_slice, pre_mask.astype(np.float32),
             )
 
         weeks_elapsed = data.get("weeks_elapsed", 3)
 
         return {
+            # Legacy unregistered pre-RT (kept for backward compatibility
+            # with the full-volume cross-session memory encoder path).
             "pre_image": to_rgb_tensor(pre_slice.astype(np.float32), self.image_size),
-            "mid_image": to_rgb_tensor(mid_slice.astype(np.float32), self.image_size),
             "pre_mask": to_mask_tensor(pre_mask.astype(np.float32), self.image_size),
-            "mid_mask": to_mask_tensor(mid_mask.astype(np.float32), self.image_size),
             "pre_mask_gtvp": to_mask_tensor(pre_gtvp_sl.astype(np.float32), self.image_size),
             "pre_mask_gtvn": to_mask_tensor(pre_gtvn_sl.astype(np.float32), self.image_size),
+
+            # Registered pre-RT (SOTA input — all HNTS-MRG top teams use this).
+            # Same spatial grid as mid_image, so SAM2's dense mask prompt
+            # actually aligns with tumor locations in mid-RT space.
+            "pre_image_registered":     to_rgb_tensor(pre_slice_reg.astype(np.float32), self.image_size),
+            "pre_mask_registered":      to_mask_tensor(((pre_gtvp_reg_sl | pre_gtvn_reg_sl)).astype(np.float32), self.image_size),
+            "pre_mask_gtvp_registered": to_mask_tensor(pre_gtvp_reg_sl.astype(np.float32), self.image_size),
+            "pre_mask_gtvn_registered": to_mask_tensor(pre_gtvn_reg_sl.astype(np.float32), self.image_size),
+
+            # Mid-RT
+            "mid_image":     to_rgb_tensor(mid_slice.astype(np.float32), self.image_size),
+            "mid_mask":      to_mask_tensor(mid_mask.astype(np.float32), self.image_size),
             "mid_mask_gtvp": to_mask_tensor(mid_gtvp_sl.astype(np.float32), self.image_size),
             "mid_mask_gtvn": to_mask_tensor(mid_gtvn_sl.astype(np.float32), self.image_size),
+
             "weeks_elapsed": weeks_elapsed,
             "patient_id": patient_dir.name,
             "slice_idx": slice_idx,
         }
+
+    def _augment_aligned(self, *arrs):
+        """Apply one set of random flips/intensity aug to N spatially-aligned (H,W) arrays.
+        First array is the "reference" intensity image for noise/brightness;
+        masks (float32 0/1) only receive the geometric transform.
+        """
+        # Decide flips once
+        hflip = random.random() < 0.5
+        vflip = random.random() < 0.3
+        add_noise = random.random() < 0.5
+        noise_sigma = random.uniform(0, 0.02) if add_noise else 0.0
+        add_bright = random.random() < 0.4
+        delta = random.uniform(-0.1, 0.1) if add_bright else 0.0
+
+        out = []
+        for i, a in enumerate(arrs):
+            a = a.copy()
+            if hflip: a = np.fliplr(a).copy()
+            if vflip: a = np.flipud(a).copy()
+            # Intensity aug only for images (first 2 entries: mid_slice, pre_slice_reg).
+            if i < 2:
+                if noise_sigma > 0:
+                    a = (a + np.random.normal(0, noise_sigma, a.shape)).clip(0, 1)
+                if delta != 0.0:
+                    a = (a + delta).clip(0, 1)
+            out.append(a)
+        return tuple(out)
+
+    def _augment_pair(self, img: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Flip/noise aug for a single (image, mask) pair on its own grid."""
+        if random.random() < 0.5:
+            img = np.fliplr(img).copy(); mask = np.fliplr(mask).copy()
+        if random.random() < 0.3:
+            img = np.flipud(img).copy(); mask = np.flipud(mask).copy()
+        if random.random() < 0.5:
+            sigma = random.uniform(0, 0.02)
+            img = (img + np.random.normal(0, sigma, img.shape)).clip(0, 1)
+        if random.random() < 0.4:
+            delta = random.uniform(-0.1, 0.1)
+            img = (img + delta).clip(0, 1)
+        return img, mask
 
     def _augment(
         self,
