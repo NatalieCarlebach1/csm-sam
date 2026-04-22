@@ -109,16 +109,28 @@ class CSMSAM(nn.Module):
             for p in self.sam2.image_encoder.parameters():
                 p.requires_grad = False
 
-    def _get_sam2_features(self, images: torch.Tensor) -> torch.Tensor:
-        """Extract SAM2 image encoder features. (B, 3, H, W) -> (B, C, h, w)."""
+    def _get_sam2_features(
+        self, images: torch.Tensor
+    ) -> tuple[torch.Tensor, list[torch.Tensor] | None]:
+        """Extract SAM2 image encoder features.
+        SAM2 is designed for 1024×1024 — resize if needed so all spatial sizes
+        (vision_features, FPN, prompt encoder PE) stay consistent.
+        Returns (vision_features (B,C,h,w), high_res_features [fpn0, fpn1] or None).
+        """
         with torch.no_grad():
             if hasattr(self.sam2, "forward_image"):
+                if images.shape[-2] != 1024 or images.shape[-1] != 1024:
+                    images = F.interpolate(
+                        images, size=(1024, 1024), mode="bilinear", align_corners=False
+                    )
                 backbone_out = self.sam2.forward_image(images)
                 features = backbone_out["vision_features"]
+                fpn = backbone_out.get("backbone_fpn", [])
+                high_res = fpn[:2] if len(fpn) >= 2 else None
             else:
-                # Fallback: a random-init projection so downstream code/tests run.
                 features = self._fallback_encoder(images)
-        return features
+                high_res = None
+        return features, high_res
 
     def _fallback_encoder(self, images: torch.Tensor) -> torch.Tensor:
         """Stand-in encoder used only when SAM2 isn't installed (unit tests)."""
@@ -160,7 +172,7 @@ class CSMSAM(nn.Module):
 
         # Batched feature extraction: flatten (B, N) -> (B*N), then reshape back.
         flat_imgs = pre_images.reshape(B * N, C_img, H, W)
-        flat_feats = self._get_sam2_features(flat_imgs)       # (B*N, C, h, w)
+        flat_feats, _ = self._get_sam2_features(flat_imgs)    # (B*N, C, h, w)
         C, h, w = flat_feats.shape[1:]
         pre_feats = flat_feats.reshape(B, N, C, h, w)
 
@@ -246,8 +258,8 @@ class CSMSAM(nn.Module):
 
             flat_pre = pre_images.reshape(B * N, C_img, H, W)
             flat_mid = mid_images.reshape(B * N, C_img, H, W)
-            pre_feats_flat = self._get_sam2_features(flat_pre)   # (B*N, C, h, w)
-            mid_feats_flat = self._get_sam2_features(flat_mid)
+            pre_feats_flat, _ = self._get_sam2_features(flat_pre)   # (B*N, C, h, w)
+            mid_feats_flat, _ = self._get_sam2_features(flat_mid)
             C, h, w = pre_feats_flat.shape[1:]
             pre_feats = pre_feats_flat.reshape(B, N, C, h, w)
             mid_feats = mid_feats_flat.reshape(B, N, C, h, w)
@@ -327,7 +339,7 @@ class CSMSAM(nn.Module):
             weeks_elapsed = torch.full((B,), 3, dtype=torch.long, device=mid_images.device)
 
         # 1. Extract mid-RT features
-        mid_feats = self._get_sam2_features(mid_images)       # (B, C, h, w)
+        mid_feats, high_res_feats = self._get_sam2_features(mid_images)  # (B, C, h, w)
         _, C, h, w = mid_feats.shape
 
         # 2. Flatten spatial dims
@@ -362,8 +374,8 @@ class CSMSAM(nn.Module):
         enhanced_feats_spatial = enhanced_feats.reshape(B, h, w, C).permute(0, 3, 1, 2)
 
         # 6. SAM2 mask decoder — run ONCE per structure with its pre-RT mask prompt.
-        mask_p = self._decode_with_mask_prompt(enhanced_feats_spatial, pre_gtvp_mask, (H, W))
-        mask_n = self._decode_with_mask_prompt(enhanced_feats_spatial, pre_gtvn_mask, (H, W))
+        mask_p = self._decode_with_mask_prompt(enhanced_feats_spatial, pre_gtvp_mask, (H, W), high_res_feats)
+        mask_n = self._decode_with_mask_prompt(enhanced_feats_spatial, pre_gtvn_mask, (H, W), high_res_feats)
         masks = torch.cat([mask_p, mask_n], dim=1)            # (B, 2, H, W)
 
         result = {
@@ -374,7 +386,7 @@ class CSMSAM(nn.Module):
 
         # 7. Change map
         if return_change_map and pre_images is not None:
-            pre_feats = self._get_sam2_features(pre_images)
+            pre_feats, _ = self._get_sam2_features(pre_images)
             change_logits = self.change_head(pre_feats, enhanced_feats_spatial)
             change_logits = F.interpolate(change_logits, size=(H, W), mode="bilinear", align_corners=False)
             result["change_map"] = change_logits
@@ -389,6 +401,7 @@ class CSMSAM(nn.Module):
         image_features: torch.Tensor,
         prior_mask: torch.Tensor | None,
         output_size: tuple[int, int],
+        high_res_features: "list[torch.Tensor] | None" = None,
     ) -> torch.Tensor:
         """
         Decode one structure using a pre-RT mask as the SAM2 mask prompt.
@@ -429,8 +442,13 @@ class CSMSAM(nn.Module):
                 sparse_prompt_embeddings=sparse_embed,
                 dense_prompt_embeddings=dense_embed,
                 multimask_output=False,
+                repeat_image=False,
+                high_res_features=high_res_features,
             )
-        except (AttributeError, TypeError):
+        except Exception as e:
+            import traceback, warnings
+            warnings.warn(f"SAM2 decoder failed ({e}), using fallback", stacklevel=2)
+            traceback.print_exc()
             low_res_masks = self._fallback_decoder(image_features, prior_mask)
 
         masks = F.interpolate(low_res_masks, size=(H, W), mode="bilinear", align_corners=False)
