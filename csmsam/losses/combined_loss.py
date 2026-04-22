@@ -21,8 +21,12 @@ from csmsam.modeling.change_head import ChangeMapLoss, build_change_labels
 from csmsam.losses.consistency import FeatureConsistencyLoss
 
 
-def _batch_pos_weight(targets: torch.Tensor, cap: float = 20.0) -> torch.Tensor:
-    """Per-channel bg/fg pixel ratio for BCE pos_weight, capped to avoid instability."""
+def _batch_pos_weight(targets: torch.Tensor, cap: float = 5.0) -> torch.Tensor:
+    """Per-channel bg/fg pixel ratio for BCE pos_weight, capped to avoid instability.
+
+    Cap is 5 (not 20): sparse-tumor targets (~1% fg) otherwise push pos_weight well
+    above 10 and cause NaN on transformer-heavy encoders.
+    """
     B, C, H, W = targets.shape
     flat = targets.reshape(B, C, -1)
     n_pos = flat.sum(dim=(0, 2)).clamp_min(1.0)

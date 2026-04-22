@@ -13,7 +13,7 @@ data:
 # ─── Model ───────────────────────────────────────────────────────────────────
 model:
   sam2_checkpoint: "checkpoints/sam2/sam2.1_hiera_large.pt"
-  sam2_cfg: "sam2.1_hiera_l"           # SAM2 model config name
+  sam2_cfg: "configs/sam2.1/sam2.1_hiera_l"  # SAM2 hydra cfg — must include "configs/" prefix
   d_model: 256                         # feature dimension (matches SAM2-L)
   num_heads: 8                         # attention heads
   n_memory_frames: 8                   # pre-RT slices encoded into memory
@@ -41,7 +41,7 @@ training:
 # ─── Loss ────────────────────────────────────────────────────────────────────
 loss:
   lambda_dice: 1.0
-  lambda_bce: 1.0
+  lambda_bce: 0.5                     # keep small — primary signal is Dice; high BCE destabilises on sparse tumors
   lambda_change: 0.3                  # change map auxiliary loss weight
   change_class_weights: [0.1, 1.0, 2.0, 2.0]  # [background, stable, grown, shrunk]
   gtvn_weight: 1.0                    # relative weight of GTVn channel vs GTVp channel in the loss

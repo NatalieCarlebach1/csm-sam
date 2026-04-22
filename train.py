@@ -74,7 +74,7 @@ def set_seed(seed: int, rank: int = 0):
 
 def build_optimizer(model: CSMSAM, cfg) -> torch.optim.Optimizer:
     """Build AdamW with separate learning rates for novel vs. decoder params."""
-    param_groups = model.get_trainable_params()
+    param_groups = unwrap(model).get_trainable_params()
 
     base_lr = cfg.training.lr
     optimizer_groups = []
