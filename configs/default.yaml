@@ -5,15 +5,15 @@
 data:
   data_dir: "data/processed"           # preprocessed dataset directory
   image_size: 1024                     # SAM2 input resolution (1024×1024)
-  batch_size: 4                        # training batch size (reduce if OOM)
+  batch_size: 16                       # training batch size (single-GPU B200 with SAM2.1 base+)
   num_workers: 4                       # dataloader workers
   pin_memory: true
   tumor_ratio: 0.7                     # fraction of training slices with tumor
 
 # ─── Model ───────────────────────────────────────────────────────────────────
 model:
-  sam2_checkpoint: "checkpoints/sam2/sam2.1_hiera_large.pt"
-  sam2_cfg: "configs/sam2.1/sam2.1_hiera_l"  # SAM2 hydra cfg — must include "configs/" prefix
+  sam2_checkpoint: "checkpoints/sam2/sam2.1_hiera_base_plus.pt"
+  sam2_cfg: "configs/sam2.1/sam2.1_hiera_b+"  # SAM2.1 Base+ hydra cfg
   d_model: 256                         # feature dimension (matches SAM2-L)
   num_heads: 8                         # attention heads
   n_memory_frames: 8                   # pre-RT slices encoded into memory
