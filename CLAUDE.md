@@ -5,8 +5,10 @@ This repository implements **RALM-SAM** — a retrieval-augmented longitudinal m
 
 **Target venue**: NeurIPS 2026  
 **Benchmark**: HNTS-MRG 2024 Task 2 (mid-RT head & neck tumor segmentation)  
-**Baseline to beat**: 72.7 aggDSC (challenge winner)  
+**Baseline to beat**: **73.3 aggDSC** — HNTS-MRG 2024 Task 2 winner, UW LAIR / Tang et al., [arXiv:2412.00663](https://arxiv.org/abs/2412.00663), [code](https://github.com/xtie97/HNTS-MRG24-UWLAIR). Runners-up: mic-dkfz **72.7** ([LongiSeg](https://github.com/MIC-DKFZ/LongiSeg), nnU-Net v2 ResEnc-L), HiLab **72.5** ([code](https://github.com/WltyBY/HNTS-MRG2024_train_code)).
 **Target**: >75 aggDSC
+
+**Preprocessing note**: All top-5 teams consume the organizer-supplied **deformably-registered pre-RT mask** (`pre_GTVp_registered.nii.gz` / `pre_GTVn_registered.nii.gz`) as a model input (either concatenated channel or mask-aware attention prior). They also resample to ~1×1×1 mm isotropic, z-score normalize per-volume, and use nnU-Net default aug. **No top team uses N4 bias correction**. See `data/preprocess.py` for the aligned pipeline.
 
 ## Architecture
 - **Frozen**: SAM2 image encoder (ViT-H) + most of the mask decoder (final layer trainable).
