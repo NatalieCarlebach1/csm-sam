@@ -187,13 +187,16 @@ def train_one_epoch(
         target_masks = _weighted_2ch_target(mid_masks_gtvp, mid_masks_gtvn)
 
         with autocast(enabled=cfg.training.amp):
-            # Encode pre-RT memory (batch of single slices)
+            # Encode pre-RT memory (batch of single slices) — unwrap DDP
+            # because encode_pre_rt / reset_mid_session_memory are custom
+            # methods not exposed by DistributedDataParallel.
+            _m = unwrap(model)
             pre_imgs_5d = pre_images.unsqueeze(1)        # (B, 1, 3, H, W)
             pre_masks_5d = pre_masks.unsqueeze(1)        # (B, 1, 1, H, W)
-            M_pre = model.encode_pre_rt(pre_imgs_5d, pre_masks_5d)
+            M_pre = _m.encode_pre_rt(pre_imgs_5d, pre_masks_5d)
 
             # Reset within-session memory for training (each slice is independent)
-            model.reset_mid_session_memory()
+            _m.reset_mid_session_memory()
 
             out = model(
                 mid_images=mid_images,
