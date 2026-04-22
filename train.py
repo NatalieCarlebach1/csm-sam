@@ -665,6 +665,8 @@ def main():
                         help="Override training.sequence_length.")
     parser.add_argument("--fold", type=int, default=None, help="k-fold index (0-based)")
     parser.add_argument("--n_folds", type=int, default=5, help="number of folds")
+    parser.add_argument("--overfit", type=int, default=0,
+                        help="Overfit on N patients (0=disabled). Forces lr=1e-4, warmup=0, accum=1.")
     args = parser.parse_args()
 
     # Load config
@@ -778,23 +780,43 @@ def main():
             pin_memory=cfg.data.pin_memory,
         )
 
+    if args.overfit > 0:
+        if is_main(rank):
+            print(f"\n*** OVERFIT MODE: using {args.overfit} patients ***\n")
+        cfg.training.lr = 1e-4
+        cfg.training.warmup_epochs = 0
+        cfg.training.accumulate_grad_batches = 1
+        from torch.utils.data import Subset
+        for key in ("train", "val"):
+            if key in loaders:
+                n = min(args.overfit, len(loaders[key].dataset))
+                loaders[key] = DataLoader(
+                    Subset(loaders[key].dataset, list(range(n))),
+                    batch_size=cfg.data.batch_size,
+                    shuffle=(key == "train"),
+                    num_workers=0,
+                    pin_memory=False,
+                )
+
     # For sequence mode we need a volume-level train loader with DistributedSampler.
     sequence_mode = bool(cfg.training.sequence_mode) and int(cfg.training.sequence_length) > 1
     if sequence_mode and "train_volumes" not in loaders:
         if is_main(rank):
             print("  Building volume loader for sequence training...")
         ds = HNTSMRGDataset(cfg.data.data_dir, split="train", image_size=cfg.data.image_size)
+        if args.overfit > 0:
+            ds = Subset(ds, list(range(min(args.overfit, len(ds)))))
         sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True) if world_size > 1 else None
         loaders["train_volumes"] = DataLoader(
             ds, batch_size=1,
             sampler=sampler,
-            shuffle=(world_size == 1),
-            num_workers=cfg.data.num_workers,
-            pin_memory=cfg.data.pin_memory,
+            shuffle=(world_size == 1 and args.overfit == 0),
+            num_workers=0 if args.overfit > 0 else cfg.data.num_workers,
+            pin_memory=False if args.overfit > 0 else cfg.data.pin_memory,
         )
 
     # Build optimizer, scheduler, loss
-    optimizer = build_optimizer(model, cfg)
+    optimizer = build_optimizer(unwrap(model), cfg)
     if sequence_mode:
         steps_per_epoch = len(loaders["train_volumes"])
     else:
