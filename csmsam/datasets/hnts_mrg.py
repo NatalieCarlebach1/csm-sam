@@ -394,7 +394,7 @@ class HNTSMRGSliceDataset(Dataset):
         augment: bool = True,
         tumor_ratio: float = 0.7,
         cache_metadata: bool = True,
-        volume_cache_size: int = 8,
+        volume_cache_size: int = 16,
         volume_cache: Optional[_VolumeCache] = None,
     ):
         """
@@ -661,7 +661,7 @@ class HNTSMRGSequenceDataset(Dataset):
         augment: bool = True,
         sequence_length: int = 4,
         tumor_window_ratio: float = 0.8,
-        volume_cache_size: int = 8,
+        volume_cache_size: int = 16,
         volume_cache: Optional[_VolumeCache] = None,
     ):
         self.data_dir = Path(data_dir) / split
@@ -933,6 +933,10 @@ def build_dataloaders(
     # GPU count.
     ddp_active = dist.is_available() and dist.is_initialized()
     train_sampler = DistributedSampler(train_ds, shuffle=True, drop_last=True) if ddp_active else None
+    # persistent_workers keeps the NIfTI-loading workers + their LRU volume
+    # caches alive across epochs. Without it workers are respawned every
+    # epoch and cache warmth is lost — ~3s/step cold-read penalty.
+    persistent = num_workers > 0
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
@@ -941,6 +945,7 @@ def build_dataloaders(
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=True,
+        persistent_workers=persistent,
     )
     val_loader = DataLoader(
         val_ds,
@@ -948,6 +953,7 @@ def build_dataloaders(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        persistent_workers=persistent,
     )
     test_loader = DataLoader(
         test_ds,
@@ -955,6 +961,7 @@ def build_dataloaders(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        persistent_workers=persistent,
     )
 
     return {"train": train_loader, "val": val_loader, "test": test_loader}

@@ -4,9 +4,9 @@
 # ─── Data ────────────────────────────────────────────────────────────────────
 data:
   data_dir: "data/processed"           # preprocessed dataset directory
-  image_size: 1024                     # SAM2 input resolution (1024×1024)
-  batch_size: 16                       # training batch size (single-GPU B200 with SAM2.1 base+)
-  num_workers: 4                       # dataloader workers
+  image_size: 512                      # dataset-side resize (SAM2 still resizes to 1024² internally)
+  batch_size: 16                       # training batch size
+  num_workers: 16                      # dataloader workers (B200 node has 224 CPUs — we can afford it)
   pin_memory: true
   tumor_ratio: 0.7                     # fraction of training slices with tumor
 
