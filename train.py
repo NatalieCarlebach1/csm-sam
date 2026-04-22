@@ -121,22 +121,29 @@ def _apply_channel_loss(
     pre_masks: torch.Tensor | None,
     mid_masks: torch.Tensor | None,
     gtvn_weight: float,
+    out: dict | None = None,
 ) -> dict[str, torch.Tensor]:
     """Thin pass-through to the 2-channel CombinedLoss.
 
-    CombinedLoss natively consumes (B, 2, H, W) pred+target and applies
-    its own ``gtvn_weight`` internally, so this helper just forwards the
-    call with consistent kwargs. The ``gtvn_weight`` argument is unused
-    here (kept in the signature for call-site compatibility and because
-    the effective weighting is handled by the loss module).
+    Forwards IoU candidates/predictions from the model output dict when
+    available so CombinedLoss can supervise SAM2's IoU head.
     """
     del gtvn_weight  # handled inside CombinedLoss
+    extra = {}
+    if out is not None:
+        extra = {
+            "candidates_gtvp": out.get("candidates_gtvp"),
+            "candidates_gtvn": out.get("candidates_gtvn"),
+            "iou_pred_gtvp": out.get("iou_pred_gtvp"),
+            "iou_pred_gtvn": out.get("iou_pred_gtvn"),
+        }
     return loss_fn(
         pred_masks=pred_masks,
         target_masks=target_masks,
         change_logits=change_logits,
         pre_masks=pre_masks,
         mid_masks=mid_masks,
+        **extra,
     )
 
 
@@ -207,6 +214,7 @@ def train_one_epoch(
                 pre_masks=pre_masks,                   # combined (B, 1, H, W)
                 mid_masks=mid_masks,                   # combined (B, 1, H, W)
                 gtvn_weight=gtvn_weight,
+                out=out,
             )
             loss = losses["total"] / accumulate
 
@@ -358,6 +366,7 @@ def train_sequence_epoch(
                         pre_masks=pm,
                         mid_masks=mm,
                         gtvn_weight=gtvn_weight,
+                        out=out,
                     )
                     step_loss = losses["total"] / n_steps_in_window / accumulate
 
@@ -828,6 +837,8 @@ def main():
         lambda_change=cfg.loss.lambda_change,
         change_loss_weights=cfg.loss.change_class_weights,
         gtvn_weight=getattr(cfg.loss, "gtvn_weight", 1.0),
+        lambda_consistency=getattr(cfg.loss, "lambda_consistency", 0.2),
+        lambda_iou=getattr(cfg.loss, "lambda_iou", 0.1),
     )
     scaler = GradScaler(enabled=cfg.training.amp and device != "cpu")
 

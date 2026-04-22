@@ -142,6 +142,7 @@ class CombinedLoss(nn.Module):
         lambda_consistency: float = 0.2,
         consistency_fg: float = 1.0,
         consistency_bg: float = 0.1,
+        lambda_iou: float = 0.1,
     ):
         super().__init__()
         self.lambda_dice = lambda_dice
@@ -149,6 +150,7 @@ class CombinedLoss(nn.Module):
         self.lambda_change = lambda_change
         self.gtvn_weight = gtvn_weight
         self.lambda_consistency = lambda_consistency
+        self.lambda_iou = lambda_iou
 
         self.dice_loss = DiceLoss(smooth=1.0)
         self.change_loss = ChangeMapLoss(weight=change_loss_weights)
@@ -174,6 +176,10 @@ class CombinedLoss(nn.Module):
         predicted_mid_features: torch.Tensor | None = None,
         actual_mid_features: torch.Tensor | None = None,
         union_mask: torch.Tensor | None = None,
+        candidates_gtvp: torch.Tensor | None = None,
+        candidates_gtvn: torch.Tensor | None = None,
+        iou_pred_gtvp: torch.Tensor | None = None,
+        iou_pred_gtvn: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Args:
@@ -278,5 +284,34 @@ class CombinedLoss(nn.Module):
             total = total + self.lambda_consistency * l_consistency
             losses["consistency"] = l_consistency.detach()
             losses["total"] = total
+
+        # IoU-head supervision: SAM2 returns per-candidate IoU predictions
+        # (B, 3). Train them with MSE against the actual DSC of each candidate
+        # vs the GT mask. Without this, argmax(iou_pred) picks candidates based
+        # on the pretrained-on-natural-images IoU head, which is miscalibrated
+        # on tumors.
+        if self.lambda_iou > 0 and (iou_pred_gtvp is not None or iou_pred_gtvn is not None):
+            iou_terms = []
+            # target_seg has shape (B, 2, H, W); split per structure.
+            tgt_p = target_seg[:, 0:1] if C_pred == 2 else target_seg
+            tgt_n = target_seg[:, 1:2] if C_pred == 2 else None
+            for cand_logits, iou_p, gt in (
+                (candidates_gtvp, iou_pred_gtvp, tgt_p),
+                (candidates_gtvn, iou_pred_gtvn, tgt_n),
+            ):
+                if cand_logits is None or iou_p is None or gt is None:
+                    continue
+                # cand_logits: (B, 3, H, W); gt: (B, 1, H, W)
+                probs = torch.sigmoid(cand_logits)
+                gt_exp = gt.expand_as(probs)
+                inter = (probs * gt_exp).sum(dim=(2, 3))           # (B, 3)
+                denom = probs.sum(dim=(2, 3)) + gt_exp.sum(dim=(2, 3))
+                true_dsc = (2.0 * inter + 1.0) / (denom + 1.0)     # (B, 3), no grad needed here
+                iou_terms.append(F.mse_loss(iou_p, true_dsc.detach()))
+            if iou_terms:
+                l_iou = torch.stack(iou_terms).mean()
+                total = total + self.lambda_iou * l_iou
+                losses["iou"] = l_iou.detach()
+                losses["total"] = total
 
         return losses

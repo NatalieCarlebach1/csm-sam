@@ -376,14 +376,23 @@ class CSMSAM(nn.Module):
         enhanced_feats_spatial = enhanced_feats.reshape(B, h, w, C).permute(0, 3, 1, 2)
 
         # 6. SAM2 mask decoder — run ONCE per structure with its pre-RT mask prompt.
-        mask_p = self._decode_with_mask_prompt(enhanced_feats_spatial, pre_gtvp_mask, (H, W), high_res_feats)
-        mask_n = self._decode_with_mask_prompt(enhanced_feats_spatial, pre_gtvn_mask, (H, W), high_res_feats)
+        mask_p, cand_p, iou_p = self._decode_with_mask_prompt(
+            enhanced_feats_spatial, pre_gtvp_mask, (H, W), high_res_feats
+        )
+        mask_n, cand_n, iou_n = self._decode_with_mask_prompt(
+            enhanced_feats_spatial, pre_gtvn_mask, (H, W), high_res_feats
+        )
         masks = torch.cat([mask_p, mask_n], dim=1)            # (B, 2, H, W)
 
         result = {
             "masks": masks,
             "gate_vals": gate_vals.reshape(B, h, w),
             "attn_weights": attn_w.mean(dim=1),               # (B, HW, N_pre)
+            # For IoU-head supervision (none if decoder fell back).
+            "candidates_gtvp": cand_p,     # (B, 3, H, W) logits
+            "candidates_gtvn": cand_n,
+            "iou_pred_gtvp": iou_p,        # (B, 3)
+            "iou_pred_gtvn": iou_n,
         }
 
         # 7. Change map
@@ -404,45 +413,46 @@ class CSMSAM(nn.Module):
         prior_mask: torch.Tensor | None,
         output_size: tuple[int, int],
         high_res_features: "list[torch.Tensor] | None" = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
-        Decode one structure using a pre-RT mask as the SAM2 mask prompt.
+        Decode one structure using a pre-RT mask prompt when available.
 
-        Falls back to a centroid-point prompt derived from the prior mask,
-        and, if the prior mask is empty, to the peak-activation point.
+        - If the prior mask is non-empty, use it as the dense SAM2 mask prompt
+          (no point prompt — the mask is richer and more reliable than a centroid).
+        - If the prior mask is empty, pass NO prompt at all (points=None,
+          masks=None). The prior "invent a peak-activation point" fallback
+          confused the decoder into hallucinating tumors on BG slices.
+
+        Returns:
+            selected_mask  : (B, 1, H, W) — upsampled logits of best-IoU candidate
+            all_masks_full : (B, 3, H, W) — all three candidates upsampled (for
+                             IoU-head supervision). None if the decoder fell back.
+            iou_pred       : (B, 3)       — SAM2's per-candidate IoU predictions.
+                             None if the decoder fell back.
         """
         B, C, h, w = image_features.shape
         H, W = output_size
-        device = image_features.device
 
-        # Prepare low-res mask prompt if available (SAM2 expects 1/4 res, ie 256 for 1024).
-        low_res_mask_prompt = None
-        point_coords = None
-        point_labels = None
-
-        # Training-only prompt dropout: 30% of the time we drop the pre-RT mask
-        # prompt to force the cross-session attention / retrieval path to carry
-        # the segmentation rather than copying the prior.
-        use_mask_prompt = True
-        if self.training and prior_mask is not None and prior_mask.sum() > 0:
-            if torch.rand(1, device=device).item() < self.prompt_dropout:
-                use_mask_prompt = False
-
-        if use_mask_prompt and prior_mask is not None and prior_mask.sum() > 0:
-            # Down-sample mask to SAM2 low-res prompt resolution.
+        has_prior = prior_mask is not None and prior_mask.sum() > 0
+        if has_prior:
             low_res_mask_prompt = F.interpolate(
                 prior_mask.float(), size=(256, 256), mode="bilinear", align_corners=False
             )
-            # Also compute a centroid point per batch element as a backup prompt.
-            point_coords, point_labels = self._mask_to_centroid_points(prior_mask, (H, W))
         else:
-            # Empty prior mask (or dropped): fall back to peak-activation point.
-            point_coords, point_labels = self._activation_peak_points(image_features, (H, W))
+            # SAM2's prompt encoder needs *something* to infer batch size when
+            # points=None. Passing zeros gives a "no-prior" dense embedding —
+            # better than inventing a peak-activation point, which made the
+            # decoder hallucinate on tumor-free slices.
+            low_res_mask_prompt = torch.zeros(
+                B, 1, 256, 256, device=image_features.device, dtype=image_features.dtype
+            )
 
         low_res_masks = None
+        all_masks = None
+        iou_pred = None
         try:
             sparse_embed, dense_embed = self.sam2.sam_prompt_encoder(
-                points=(point_coords, point_labels) if point_coords is not None else None,
+                points=None,  # no centroid/peak point; rely on dense mask or pure image evidence
                 boxes=None,
                 masks=low_res_mask_prompt,
             )
@@ -455,21 +465,22 @@ class CSMSAM(nn.Module):
                 repeat_image=False,
                 high_res_features=high_res_features,
             )
-            # SAM2 returns (masks, iou_pred, sam_tokens, object_score_logits).
-            # With multimask_output=True, masks is (B, 3, h, w) and iou_pred is (B, 3);
-            # select the highest-IoU candidate per batch element.
-            all_masks, iou_pred = decoder_out[0], decoder_out[1]
-            best = iou_pred.argmax(dim=1)                       # (B,)
+            # (masks, iou_pred, sam_tokens, object_score_logits); multimask → 3 candidates
+            all_masks, iou_pred = decoder_out[0], decoder_out[1]  # (B,3,h,w), (B,3)
+            best = iou_pred.argmax(dim=1)                          # (B,)
             idx = best.view(-1, 1, 1, 1).expand(-1, 1, all_masks.shape[-2], all_masks.shape[-1])
-            low_res_masks = all_masks.gather(1, idx)            # (B, 1, h, w)
+            low_res_masks = all_masks.gather(1, idx)               # (B,1,h,w)
         except Exception as e:
             import traceback, warnings
             warnings.warn(f"SAM2 decoder failed ({e}), using fallback", stacklevel=2)
             traceback.print_exc()
             low_res_masks = self._fallback_decoder(image_features, prior_mask)
 
-        masks = F.interpolate(low_res_masks, size=(H, W), mode="bilinear", align_corners=False)
-        return masks
+        selected = F.interpolate(low_res_masks, size=(H, W), mode="bilinear", align_corners=False)
+        all_full = None
+        if all_masks is not None:
+            all_full = F.interpolate(all_masks, size=(H, W), mode="bilinear", align_corners=False)
+        return selected, all_full, iou_pred
 
     @staticmethod
     def _mask_to_centroid_points(
