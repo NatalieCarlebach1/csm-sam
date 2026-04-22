@@ -436,7 +436,7 @@ class CSMSAM(nn.Module):
                 boxes=None,
                 masks=low_res_mask_prompt,
             )
-            low_res_masks, _ = self.sam2.sam_mask_decoder(
+            decoder_out = self.sam2.sam_mask_decoder(
                 image_embeddings=image_features,
                 image_pe=self.sam2.sam_prompt_encoder.get_dense_pe(),
                 sparse_prompt_embeddings=sparse_embed,
@@ -445,6 +445,7 @@ class CSMSAM(nn.Module):
                 repeat_image=False,
                 high_res_features=high_res_features,
             )
+            low_res_masks = decoder_out[0]  # SAM2 returns (masks, iou, sam_tokens, object_score_logits)
         except Exception as e:
             import traceback, warnings
             warnings.warn(f"SAM2 decoder failed ({e}), using fallback", stacklevel=2)
