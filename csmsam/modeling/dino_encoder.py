@@ -275,6 +275,10 @@ class DinoEncoder(nn.Module):
         feature_layers: Optional[List[int]] = None,
         sam_dim: int = 256,
         hf_id: Optional[str] = None,
+        lora_rank: int = 0,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.05,
+        lora_targets: Optional[List[str]] = None,
     ):
         super().__init__()
 
@@ -316,10 +320,37 @@ class DinoEncoder(nn.Module):
         # Number of register tokens (DINOv2-with-registers has 4; vanilla DINOv2 has 0).
         self.num_registers = int(getattr(cfg, "num_register_tokens", 0))
 
-        # Freeze the backbone.
+        # Freeze the backbone (LoRA will selectively unfreeze below if requested).
         for p in self.dino.parameters():
             p.requires_grad = False
-        self.dino.eval()
+
+        # Optional LoRA adapters on DINO attention projections. r=0 → fully
+        # frozen (original behaviour). Otherwise we inject low-rank adapters
+        # on the requested modules ("query","value" by default — adapts
+        # attention without touching FFN → ~0.5M trainable at r=8 for
+        # DINOv2-base) so DINO features can adapt to tumor MRI without
+        # overfitting ~125 patients.
+        self.lora_rank = int(lora_rank) if lora_rank is not None else 0
+        if self.lora_rank > 0:
+            try:
+                from peft import LoraConfig, get_peft_model
+            except ImportError as e:
+                raise ImportError(
+                    "peft is required when lora_rank > 0. Run: pip install 'peft>=0.11'"
+                ) from e
+            targets = lora_targets or ["query", "value"]
+            lora_cfg = LoraConfig(
+                r=self.lora_rank,
+                lora_alpha=lora_alpha,
+                target_modules=targets,
+                lora_dropout=lora_dropout,
+                bias="none",
+            )
+            self.dino = get_peft_model(self.dino, lora_cfg)
+            # peft will have set requires_grad=True on lora_A / lora_B weights.
+            # Keep dino in train mode so dropout etc. in adapters fire.
+        else:
+            self.dino.eval()
 
         self.bridge = _Bridge(
             dino_dim=self.dino_dim,
@@ -328,23 +359,41 @@ class DinoEncoder(nn.Module):
             target_grid=self.target_grid,
         )
 
-    # Keep DINO in eval() even if model.train() is called externally (batchnorm,
-    # dropout should not be active in a frozen backbone).
+    # When DINO is fully frozen we keep it in eval() (no dropout, no BN update).
+    # When LoRA adapters are active we must respect the top-level train/eval
+    # mode so LoRA dropout fires during training but not during validation.
     def train(self, mode: bool = True):
         super().train(mode)
-        self.dino.eval()
+        if self.lora_rank == 0:
+            self.dino.eval()
         return self
 
     def trainable_parameters(self):
-        """Only Bridge params — DINO is always frozen."""
+        """Bridge params + LoRA adapter params (if lora_rank > 0)."""
         yield from self.bridge.parameters()
+        if self.lora_rank > 0:
+            for p in self.dino.parameters():
+                if p.requires_grad:
+                    yield p
 
     def count_trainable_params(self) -> int:
-        return sum(p.numel() for p in self.bridge.parameters() if p.requires_grad)
+        n = sum(p.numel() for p in self.bridge.parameters() if p.requires_grad)
+        if self.lora_rank > 0:
+            n += sum(p.numel() for p in self.dino.parameters() if p.requires_grad)
+        return n
 
-    @torch.no_grad()
     def _forward_dino(self, images: Tensor) -> Tuple[List[Tensor], int, int]:
-        """Run DINO, return selected hidden states (CLS/registers stripped) and patch grid."""
+        """Run DINO, return selected hidden states (CLS/registers stripped) and patch grid.
+
+        Wrapped in torch.no_grad() when DINO is fully frozen; under LoRA we
+        need gradients to flow through the adapters so we just run it normally.
+        """
+        if self.lora_rank > 0:
+            return self._forward_dino_impl(images)
+        with torch.no_grad():
+            return self._forward_dino_impl(images)
+
+    def _forward_dino_impl(self, images: Tensor) -> Tuple[List[Tensor], int, int]:
         # HF DINOv2 supports arbitrary input sizes via interpolate_pos_encoding, but
         # patch-14 + odd input can leave 1 extra row/col that gets sliced. Resize
         # to a DINO-friendly square so the patch grid is deterministic.

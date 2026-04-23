@@ -1,0 +1,89 @@
+# Overfit capability test — drive train DSC → 1.0 on 4 patients.
+# Run with: python train.py --config configs/overfit.yaml --overfit 4
+# Architecture: DINOv2+Bridge with LoRA (r=8) to let DINO adapt.
+
+# ─── Data ────────────────────────────────────────────────────────────────────
+data:
+  data_dir: "data/processed"
+  image_size: 512
+  batch_size: 16                       # overrides at overfit — uses bs=n (=4) anyway
+  num_workers: 0                       # overfit forces this
+  pin_memory: false
+  tumor_ratio: 0.7
+
+# ─── Model ───────────────────────────────────────────────────────────────────
+model:
+  sam2_checkpoint: "checkpoints/sam2/sam2.1_hiera_base_plus.pt"
+  sam2_cfg: "configs/sam2.1/sam2.1_hiera_b+"
+  encoder_type: "dino_sam"
+  dino_variant: "dinov2_base"
+  dino_img_size: 518
+  dino_feature_layers: null
+  dino_lora_rank: 8                    # <<< LoRA ON for this run
+  dino_lora_alpha: 16
+  dino_lora_dropout: 0.0               # no dropout in overfit mode
+  dino_lora_targets: null              # default ["query","value"]
+  d_model: 256
+  num_heads: 8
+  n_memory_frames: 8
+  spatial_pool_size: 32
+  memory_bank_max_slices: 128
+  mid_memory_pool_size: 16
+  max_weeks: 12
+  dropout: 0.0
+  temporal_encoder_type: "continuous"
+  temporal_hidden_dim: 16
+  temporal_n_frequencies: 2
+  prompt_dropout: 0.0                  # overfit overrides to 0 anyway
+
+# ─── Training ────────────────────────────────────────────────────────────────
+training:
+  epochs: 100                          # overfit should converge by ~50 if arch fits
+  lr: 1e-4                             # overfit overrides
+  lr_decoder: 1e-5
+  weight_decay: 0.0                    # overfit overrides
+  warmup_epochs: 0                     # overfit overrides
+  scheduler: "cosine"
+  gradient_clip_norm: 1.0
+  amp: false                           # disable AMP for cleaner overfit signal
+  accumulate_grad_batches: 1
+  sequence_length: 4
+  sequence_mode: true
+
+# ─── Loss ────────────────────────────────────────────────────────────────────
+loss:
+  lambda_dice: 1.0
+  lambda_bce: 0.5
+  lambda_change: 0.0                   # disable aux losses so Dice can go to 0
+  change_class_weights: [0.1, 1.0, 2.0, 2.0]
+  gtvn_weight: 1.0
+  lambda_consistency: 0.0              # disable
+  consistency_fg: 1.0
+  consistency_bg: 0.1
+  lambda_iou: 0.0
+
+# ─── Retrieval ───────────────────────────────────────────────────────────────
+retrieval:
+  enabled: false                       # off for overfit
+
+# ─── Evaluation ──────────────────────────────────────────────────────────────
+evaluation:
+  val_every_n_epochs: 10000            # overfit overrides to 10**9
+  primary_metric: "agg_dsc"
+  threshold: 0.5
+  voxel_spacing: [3.0, 1.0, 1.0]
+
+checkpoint:
+  output_dir: "checkpoints/overfit4_lora8"
+  save_every_n_epochs: 10000
+  keep_last_n: 1
+  save_best: false
+
+logging:
+  use_wandb: false
+  log_every_n_steps: 1
+
+hardware:
+  device: "cuda"
+  num_gpus: 1
+  seed: 42

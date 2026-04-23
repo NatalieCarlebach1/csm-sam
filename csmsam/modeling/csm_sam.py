@@ -640,6 +640,10 @@ class CSMSAM(nn.Module):
         dino_variant: str = "dinov2_base",
         dino_img_size: int = 518,
         dino_feature_layers: "list[int] | None" = None,
+        dino_lora_rank: int = 0,
+        dino_lora_alpha: int = 16,
+        dino_lora_dropout: float = 0.05,
+        dino_lora_targets: "list[str] | None" = None,
         **kwargs,
     ) -> "CSMSAM":
         """Build CSMSAM with either SAM2's Hiera encoder or a DINOv2+Bridge encoder.
@@ -676,6 +680,10 @@ class CSMSAM(nn.Module):
                 target_grid=64,
                 feature_layers=dino_feature_layers,
                 sam_dim=sam_dim,
+                lora_rank=dino_lora_rank,
+                lora_alpha=dino_lora_alpha,
+                lora_dropout=dino_lora_dropout,
+                lora_targets=dino_lora_targets,
             )
         elif encoder_type != "sam2":
             raise ValueError(f"Unknown encoder_type: {encoder_type!r} (expected 'sam2' or 'dino_sam')")

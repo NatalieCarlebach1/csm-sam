@@ -781,6 +781,16 @@ def main():
         if hasattr(cfg.model, "get") else getattr(cfg.model, "dino_img_size", 518)
     dino_feature_layers = cfg.model.get("dino_feature_layers", None) \
         if hasattr(cfg.model, "get") else getattr(cfg.model, "dino_feature_layers", None)
+    dino_lora_rank = int(cfg.model.get("dino_lora_rank", 0)) \
+        if hasattr(cfg.model, "get") else int(getattr(cfg.model, "dino_lora_rank", 0))
+    dino_lora_alpha = int(cfg.model.get("dino_lora_alpha", 16)) \
+        if hasattr(cfg.model, "get") else int(getattr(cfg.model, "dino_lora_alpha", 16))
+    dino_lora_dropout = float(cfg.model.get("dino_lora_dropout", 0.05)) \
+        if hasattr(cfg.model, "get") else float(getattr(cfg.model, "dino_lora_dropout", 0.05))
+    dino_lora_targets = cfg.model.get("dino_lora_targets", None) \
+        if hasattr(cfg.model, "get") else getattr(cfg.model, "dino_lora_targets", None)
+    if dino_lora_targets is not None:
+        dino_lora_targets = list(dino_lora_targets)
     memory_bank_max_slices = cfg.model.get("memory_bank_max_slices", 128) \
         if hasattr(cfg.model, "get") else getattr(cfg.model, "memory_bank_max_slices", 128)
     mid_memory_pool_size = cfg.model.get("mid_memory_pool_size", 16) \
@@ -793,6 +803,10 @@ def main():
         dino_variant=dino_variant,
         dino_img_size=dino_img_size,
         dino_feature_layers=dino_feature_layers,
+        dino_lora_rank=dino_lora_rank,
+        dino_lora_alpha=dino_lora_alpha,
+        dino_lora_dropout=dino_lora_dropout,
+        dino_lora_targets=dino_lora_targets,
         d_model=cfg.model.d_model,
         num_heads=cfg.model.num_heads,
         n_memory_frames=cfg.model.n_memory_frames,
@@ -848,6 +862,15 @@ def main():
         cfg.training.lr = 1e-4
         cfg.training.warmup_epochs = 0
         cfg.training.accumulate_grad_batches = 1
+        # Overfit is a memorization test — also kill L2 regularization so
+        # the model can freely fit the 4 patients without penalty.
+        cfg.training.weight_decay = 0.0
+        # Kill per-slice augmentation (flips/noise/brightness) — overfit
+        # should see identical inputs every epoch to hit train DSC→1.
+        for _key, _ld in loaders.items():
+            _ds = getattr(_ld, "dataset", None)
+            if _ds is not None and hasattr(_ds, "augment"):
+                _ds.augment = False
         # Kill per-epoch wait: full-volume validation (slice-by-slice) and
         # periodic checkpoints are not useful when overfitting N slices.
         cfg.evaluation.val_every_n_epochs = 10**9

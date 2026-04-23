@@ -18,6 +18,10 @@ model:
   dino_variant: "dinov2_base"           # used when encoder_type=dino_sam. See csmsam/modeling/dino_encoder.DINO_VARIANTS
   dino_img_size: 518                    # DINO input size (should be a multiple of patch_size; 518 = 37×14)
   dino_feature_layers: null             # null = equally spaced quarter/half/three-quarter/last
+  dino_lora_rank: 0                     # 0 = frozen DINO (default). r=8 adds ~0.4M LoRA params for attention adapt
+  dino_lora_alpha: 16                   # standard LoRA scaling (usually 2× rank)
+  dino_lora_dropout: 0.05               # LoRA-only dropout (training)
+  dino_lora_targets: null               # null → ["query","value"]; try ["query","key","value","output.dense"] for heavier adaptation
   d_model: 256                         # feature dimension (matches SAM2-L)
   num_heads: 8                         # attention heads
   n_memory_frames: 8                   # pre-RT slices encoded into memory
