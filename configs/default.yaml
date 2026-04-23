@@ -4,7 +4,7 @@
 # ─── Data ────────────────────────────────────────────────────────────────────
 data:
   data_dir: "data/processed"           # preprocessed dataset directory
-  image_size: 512                      # dataset-side resize (SAM2 still resizes to 1024² internally)
+  image_size: 1024                     # SAM2.1 Hiera-L native res (DINO path was 512; SAM2 path runs at 1024)
   batch_size: 16                       # training batch size
   num_workers: 8                       # dataloader workers per rank (16 OOM'd host RAM on 4-GPU DDP with cache=16)
   pin_memory: true
@@ -12,9 +12,9 @@ data:
 
 # ─── Model ───────────────────────────────────────────────────────────────────
 model:
-  sam2_checkpoint: "checkpoints/sam2/sam2.1_hiera_base_plus.pt"
-  sam2_cfg: "configs/sam2.1/sam2.1_hiera_b+"  # SAM2.1 Base+ hydra cfg
-  encoder_type: "dino_sam"              # "sam2" (Hiera) | "dino_sam" (frozen DINOv2 + trainable Bridge → SAM2 decoder; default on tals-local)
+  sam2_checkpoint: "checkpoints/sam2/sam2.1_hiera_large.pt"
+  sam2_cfg: "configs/sam2.1/sam2.1_hiera_l"  # SAM2.1 Hiera-Large — full ViT-H backbone
+  encoder_type: "sam2"                  # back to frozen SAM2 Hiera (was dino_sam+Bridge; val plateau at 0.57 on 125 patients — try the pure SAM2 path)
   dino_variant: "dinov2_base"           # used when encoder_type=dino_sam. See csmsam/modeling/dino_encoder.DINO_VARIANTS
   dino_img_size: 518                    # DINO input size (should be a multiple of patch_size; 518 = 37×14)
   dino_feature_layers: null             # null = equally spaced quarter/half/three-quarter/last
@@ -59,7 +59,7 @@ loss:
   lambda_consistency: 0.1             # longitudinal feature consistency loss (was 0.5; too loud)
   consistency_fg: 1.0                 # tumor-region weight (inside union mask)
   consistency_bg: 0.1                 # background weight (outside union mask)
-  lambda_iou: 0.0                     # IoU-head supervision — disabled on tals-local: dino_sam uses multimask_output=False (1 mask, no 3-candidate argmax), so there's nothing to calibrate. Re-enable for encoder_type=sam2 runs.
+  lambda_iou: 0.1                     # IoU-head supervision active under encoder_type=sam2 (multimask_output=True → 3 candidates, need to train best-IoU selection)
 
 # ─── Cross-Patient Retrieval ─────────────────────────────────────────────────
 retrieval:
