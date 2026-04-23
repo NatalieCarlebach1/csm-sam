@@ -849,17 +849,31 @@ def main():
         cfg.checkpoint.save_best = False
         # Log every step (overfit runs 1-2 steps/epoch; default 20 hides progress).
         cfg.logging.log_every_n_steps = 1
+        # Overfit is a memorization test — kill the prior-dropout that was
+        # added to prevent 'copy the prior' collapse on full-data runs; here
+        # it just adds variance by randomly dropping the mask on 30% of steps.
+        _om = unwrap(model)
+        if hasattr(_om, "prompt_dropout"):
+            _om.prompt_dropout = 0.0
         from torch.utils.data import Subset
         for key in ("train", "val"):
             if key in loaders:
                 n = min(args.overfit, len(loaders[key].dataset))
                 # val is volume-level (variable N_slices per patient) → bs must stay 1
                 # to avoid a stack() over unequal first-dims in the default collate.
-                bs = cfg.data.batch_size if key == "train" else 1
+                # train: use bs=n so the single optimizer step each epoch sees every
+                # slice — eliminates batch-composition jitter with shuffle on a
+                # tiny dataset (3 slices ↔ 3 distinct bs=2 batches = per-epoch noise).
+                if key == "train":
+                    bs = n
+                    shuffle = False
+                else:
+                    bs = 1
+                    shuffle = False
                 loaders[key] = DataLoader(
                     Subset(loaders[key].dataset, list(range(n))),
                     batch_size=bs,
-                    shuffle=(key == "train"),
+                    shuffle=shuffle,
                     num_workers=0,
                     pin_memory=False,
                 )
