@@ -846,9 +846,12 @@ def main():
         for key in ("train", "val"):
             if key in loaders:
                 n = min(args.overfit, len(loaders[key].dataset))
+                # val is volume-level (variable N_slices per patient) → bs must stay 1
+                # to avoid a stack() over unequal first-dims in the default collate.
+                bs = cfg.data.batch_size if key == "train" else 1
                 loaders[key] = DataLoader(
                     Subset(loaders[key].dataset, list(range(n))),
-                    batch_size=cfg.data.batch_size,
+                    batch_size=bs,
                     shuffle=(key == "train"),
                     num_workers=0,
                     pin_memory=False,
