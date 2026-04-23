@@ -893,6 +893,7 @@ def build_dataloaders(
     pin_memory: bool = True,
     sequence_length: int = 0,
     tumor_window_ratio: float = 0.8,
+    prefetch_factor: Optional[int] = None,
 ) -> dict[str, DataLoader]:
     """
     Build train (slice- or sequence-level) and val/test (volume-level) DataLoaders.
@@ -937,6 +938,9 @@ def build_dataloaders(
     # caches alive across epochs. Without it workers are respawned every
     # epoch and cache warmth is lost — ~3s/step cold-read penalty.
     persistent = num_workers > 0
+    loader_kwargs = {}
+    if num_workers > 0 and prefetch_factor is not None:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
@@ -946,6 +950,7 @@ def build_dataloaders(
         pin_memory=pin_memory,
         drop_last=True,
         persistent_workers=persistent,
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         val_ds,
@@ -954,6 +959,7 @@ def build_dataloaders(
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=persistent,
+        **loader_kwargs,
     )
     test_loader = DataLoader(
         test_ds,
@@ -962,6 +968,7 @@ def build_dataloaders(
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=persistent,
+        **loader_kwargs,
     )
 
     return {"train": train_loader, "val": val_loader, "test": test_loader}

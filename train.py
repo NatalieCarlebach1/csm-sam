@@ -665,10 +665,19 @@ def main():
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--epochs", type=int, default=None, help="Override epochs")
     parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--num_workers", type=int, default=None,
+                        help="Override data.num_workers (useful for local runs).")
+    parser.add_argument("--prefetch_factor", type=int, default=None,
+                        help="DataLoader prefetch_factor (per worker). Only used when num_workers>0.")
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--data_dir", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--sam2_checkpoint", type=str, default=None)
+    parser.add_argument("--encoder_type", type=str, default=None,
+                        choices=(None, "sam2", "dino_sam"),
+                        help="Override model.encoder_type. 'dino_sam' swaps SAM2-Hiera for DINOv2+Bridge.")
+    parser.add_argument("--dino_variant", type=str, default=None,
+                        help="Override model.dino_variant (e.g. dinov2_base, dinov2_large).")
     parser.add_argument("--no_wandb", action="store_true")
     parser.add_argument(
         "--sequence_train",
@@ -699,6 +708,10 @@ def main():
         cfg.training.epochs = args.epochs
     if args.batch_size is not None:
         cfg.data.batch_size = args.batch_size
+    if args.num_workers is not None:
+        cfg.data.num_workers = args.num_workers
+    if args.prefetch_factor is not None:
+        cfg.data.prefetch_factor = args.prefetch_factor
     if args.lr is not None:
         cfg.training.lr = args.lr
     if args.data_dir is not None:
@@ -707,6 +720,10 @@ def main():
         cfg.checkpoint.output_dir = args.output_dir
     if args.sam2_checkpoint is not None:
         cfg.model.sam2_checkpoint = args.sam2_checkpoint
+    if args.encoder_type is not None:
+        cfg.model.encoder_type = args.encoder_type
+    if args.dino_variant is not None:
+        cfg.model.dino_variant = args.dino_variant
     if args.no_wandb:
         cfg.logging.use_wandb = False
     if args.sequence_train is not None:
@@ -756,9 +773,22 @@ def main():
     prompt_dropout = cfg.model.get("prompt_dropout", 0.0) \
         if hasattr(cfg.model, "get") else getattr(cfg.model, "prompt_dropout", 0.0)
 
+    encoder_type = cfg.model.get("encoder_type", "sam2") \
+        if hasattr(cfg.model, "get") else getattr(cfg.model, "encoder_type", "sam2")
+    dino_variant = cfg.model.get("dino_variant", "dinov2_base") \
+        if hasattr(cfg.model, "get") else getattr(cfg.model, "dino_variant", "dinov2_base")
+    dino_img_size = cfg.model.get("dino_img_size", 518) \
+        if hasattr(cfg.model, "get") else getattr(cfg.model, "dino_img_size", 518)
+    dino_feature_layers = cfg.model.get("dino_feature_layers", None) \
+        if hasattr(cfg.model, "get") else getattr(cfg.model, "dino_feature_layers", None)
+
     model = CSMSAM.from_pretrained(
         sam2_checkpoint=cfg.model.sam2_checkpoint,
         sam2_cfg=cfg.model.sam2_cfg,
+        encoder_type=encoder_type,
+        dino_variant=dino_variant,
+        dino_img_size=dino_img_size,
+        dino_feature_layers=dino_feature_layers,
         d_model=cfg.model.d_model,
         num_heads=cfg.model.num_heads,
         n_memory_frames=cfg.model.n_memory_frames,
@@ -803,6 +833,7 @@ def main():
             num_workers=cfg.data.num_workers,
             image_size=cfg.data.image_size,
             pin_memory=cfg.data.pin_memory,
+            prefetch_factor=cfg.data.get("prefetch_factor", None),
         )
 
     if args.overfit > 0:

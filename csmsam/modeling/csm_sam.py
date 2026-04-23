@@ -64,9 +64,14 @@ class CSMSAM(nn.Module):
         retrieval_n_tokens: int = 16,
         retrieval_gate_init: float = 0.0,
         prompt_dropout: float = 0.0,
+        image_encoder: "nn.Module | None" = None,
     ):
         super().__init__()
         self.sam2 = sam2_model
+        # Optional override: a module that replaces SAM2's image encoder entirely.
+        # Expected contract: forward(images) -> (image_emb [B, C, h, w],
+        # high_res_features: list[Tensor] | None). See DinoEncoder.
+        self.image_encoder = image_encoder
         self.memory_bank_max_slices = memory_bank_max_slices
         self.use_cross_patient_retrieval = use_cross_patient_retrieval
         self.retrieval_n_tokens = retrieval_n_tokens
@@ -107,6 +112,9 @@ class CSMSAM(nn.Module):
         self._M_mid: torch.Tensor | None = None
 
     def _freeze_sam2_encoder(self):
+        # SAM2's own Hiera is always frozen. When a custom image_encoder is in
+        # use we still freeze this so no wasted memory is spent on SAM2's trunk;
+        # the custom encoder manages its own frozen/trainable split.
         if hasattr(self.sam2, "image_encoder"):
             for p in self.sam2.image_encoder.parameters():
                 p.requires_grad = False
@@ -114,11 +122,16 @@ class CSMSAM(nn.Module):
     def _get_sam2_features(
         self, images: torch.Tensor
     ) -> tuple[torch.Tensor, list[torch.Tensor] | None]:
-        """Extract SAM2 image encoder features.
-        SAM2 is designed for 1024×1024 — resize if needed so all spatial sizes
-        (vision_features, FPN, prompt encoder PE) stay consistent.
+        """Extract image-encoder features (SAM2 Hiera or a custom encoder).
+
+        If ``self.image_encoder`` is set (e.g. DinoEncoder), delegate — it has
+        its own trainable Bridge whose grads we want to keep. Otherwise use
+        SAM2's frozen Hiera backbone.
+
         Returns (vision_features (B,C,h,w), high_res_features [fpn0, fpn1] or None).
         """
+        if self.image_encoder is not None:
+            return self.image_encoder(images)
         with torch.no_grad():
             if hasattr(self.sam2, "forward_image"):
                 if images.shape[-2] != 1024 or images.shape[-1] != 1024:
@@ -173,8 +186,11 @@ class CSMSAM(nn.Module):
             N = n_frames
 
         # Batched feature extraction: flatten (B, N) -> (B*N), then reshape back.
+        # Pre-RT memory is built once per volume and does not need grads — skipping
+        # them here keeps Bridge activations off the graph for all N slices.
         flat_imgs = pre_images.reshape(B * N, C_img, H, W)
-        flat_feats, _ = self._get_sam2_features(flat_imgs)    # (B*N, C, h, w)
+        with torch.no_grad():
+            flat_feats, _ = self._get_sam2_features(flat_imgs)    # (B*N, C, h, w)
         C, h, w = flat_feats.shape[1:]
         pre_feats = flat_feats.reshape(B, N, C, h, w)
 
@@ -551,8 +567,23 @@ class CSMSAM(nn.Module):
         cls,
         sam2_checkpoint: str,
         sam2_cfg: str = "sam2_hiera_large",
+        encoder_type: str = "sam2",
+        dino_variant: str = "dinov2_base",
+        dino_img_size: int = 518,
+        dino_feature_layers: "list[int] | None" = None,
         **kwargs,
     ) -> "CSMSAM":
+        """Build CSMSAM with either SAM2's Hiera encoder or a DINOv2+Bridge encoder.
+
+        Args:
+            encoder_type: "sam2" (default, original behaviour) or "dino_sam"
+                          (frozen DINOv2 backbone + trainable Bridge → SAM2 decoder).
+            dino_variant: key into csmsam.modeling.dino_encoder.DINO_VARIANTS
+                          when encoder_type="dino_sam". Ignored otherwise.
+            dino_img_size: square input size fed to DINO (multiple of its patch size).
+            dino_feature_layers: which DINO block outputs to fuse. None = equally
+                                 spaced (quarter/half/three-quarter/last).
+        """
         try:
             from sam2.build_sam import build_sam2
             sam2 = build_sam2(sam2_cfg, sam2_checkpoint, device="cpu")
@@ -563,9 +594,24 @@ class CSMSAM(nn.Module):
                 "  pip install -e sam2/"
             )
         in_chans = kwargs.pop("in_chans", 3)
-        if in_chans != 3:
+        if in_chans != 3 and encoder_type == "sam2":
             CSMSAM._expand_patch_embed(sam2, in_chans)
-        return cls(sam2_model=sam2, **kwargs)
+
+        image_encoder = None
+        if encoder_type == "dino_sam":
+            from .dino_encoder import DinoEncoder
+            sam_dim = kwargs.get("d_model", 256)
+            image_encoder = DinoEncoder(
+                variant=dino_variant,
+                dino_img_size=dino_img_size,
+                target_grid=64,
+                feature_layers=dino_feature_layers,
+                sam_dim=sam_dim,
+            )
+        elif encoder_type != "sam2":
+            raise ValueError(f"Unknown encoder_type: {encoder_type!r} (expected 'sam2' or 'dino_sam')")
+
+        return cls(sam2_model=sam2, image_encoder=image_encoder, **kwargs)
 
     @staticmethod
     def _expand_patch_embed(sam2_model, in_chans: int) -> None:
@@ -599,6 +645,13 @@ class CSMSAM(nn.Module):
         )
         if self.retrieval is not None:
             novel_params += list(self.retrieval.parameters())
+        # When a custom image_encoder is attached (e.g. DinoEncoder), its
+        # Bridge is trainable; the backbone inside it stays frozen.
+        if self.image_encoder is not None:
+            if hasattr(self.image_encoder, "trainable_parameters"):
+                novel_params += list(self.image_encoder.trainable_parameters())
+            else:
+                novel_params += [p for p in self.image_encoder.parameters() if p.requires_grad]
 
         # Unfreeze the full SAM2 mask decoder (transformer + final layers) at
         # a 10x-smaller LR. Keeping only output_upscaling+hypernetworks trainable
@@ -624,5 +677,14 @@ class CSMSAM(nn.Module):
         if self.retrieval is not None:
             groups["retrieval"] = self.retrieval
         counts = {name: sum(p.numel() for p in m.parameters() if p.requires_grad) for name, m in groups.items()}
+        if self.image_encoder is not None:
+            # Only Bridge (or whatever the custom encoder exposes as trainable)
+            # should show up here — DINO stays frozen.
+            if hasattr(self.image_encoder, "count_trainable_params"):
+                counts["image_encoder"] = int(self.image_encoder.count_trainable_params())
+            else:
+                counts["image_encoder"] = sum(
+                    p.numel() for p in self.image_encoder.parameters() if p.requires_grad
+                )
         counts["total"] = sum(counts.values())
         return counts
