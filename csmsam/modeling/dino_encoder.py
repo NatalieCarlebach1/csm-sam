@@ -82,6 +82,33 @@ class _TransformerRefinement(nn.Module):
         return tokens.transpose(1, 2).view(B, C, H, W)
 
 
+class _MaskEncoder(nn.Module):
+    """Tiny conv stack: [B, 1, H, W] → [B, sam_dim, target_grid, target_grid]."""
+
+    def __init__(self, out_dim: int = 256, target_grid: int = 64):
+        super().__init__()
+        self.target_grid = target_grid
+        # Work at target_grid resolution end-to-end — the input mask is first
+        # bilinearly downsampled to that grid so receptive field is bounded
+        # regardless of input size.
+        self.stem = nn.Sequential(
+            nn.Conv2d(1, 32, 3, padding=1, bias=False),
+            nn.GroupNorm(8, 32), nn.GELU(),
+            nn.Conv2d(32, 128, 3, padding=1, bias=False),
+            nn.GroupNorm(32, 128), nn.GELU(),
+            nn.Conv2d(128, out_dim, 3, padding=1, bias=False),
+            nn.GroupNorm(32, out_dim),
+        )
+
+    def forward(self, mask: Tensor) -> Tensor:
+        if mask.shape[-1] != self.target_grid or mask.shape[-2] != self.target_grid:
+            mask = F.interpolate(
+                mask.float(), size=(self.target_grid, self.target_grid),
+                mode="bilinear", align_corners=False,
+            )
+        return self.stem(mask)                                  # [B, 256, g, g]
+
+
 # ---------------------------------------------------------------------------
 # Bridge (trimmed: no dense_prompt / change_proj path)
 # ---------------------------------------------------------------------------
@@ -93,15 +120,26 @@ class _Bridge(nn.Module):
                      (CLS already stripped). S = h * w patches.
         h, w: DINO patch-grid spatial dims.
 
-    Output:
+    Output of `forward`:
         image_emb        : [B, sam_dim, target_h, target_w]
         high_res_features: [feat_s0 [B, 32, 4·target_h, 4·target_w],
                             feat_s1 [B, 64, 2·target_h, 2·target_w]]
+
+    Output of `forward_mask(image_emb, mask)` — galash-style dense_prompt path:
+        dense_prompt     : [B, sam_dim, target_h, target_w]
+        A tiny MaskEncoder embeds the pre-RT structure mask to the decoder
+        grid; mask tokens are then the query in a cross-attention block whose
+        key/value is the (memory-aware) image_emb. The resulting tokens become
+        dense_prompt for the SAM2 mask decoder, replacing SAM2's frozen
+        prompt_encoder(masks=...) path. Running this per structure (GTVp,
+        GTVn) shares the single DINO+Bridge image forward.
     """
 
-    def __init__(self, dino_dim: int, sam_dim: int = 256, num_scales: int = 4):
+    def __init__(self, dino_dim: int, sam_dim: int = 256, num_scales: int = 4,
+                 target_grid: int = 64):
         super().__init__()
         self.sam_dim = sam_dim
+        self.target_grid = target_grid
 
         self.scale_projs = nn.ModuleList([
             nn.Sequential(
@@ -138,6 +176,16 @@ class _Bridge(nn.Module):
             nn.Conv2d(32, 32, 3, padding=1, bias=False), nn.GroupNorm(8, 32), nn.GELU(),
             nn.Conv2d(32, 32, 3, padding=1, bias=False), nn.GroupNorm(8, 32), nn.GELU(),
         )
+
+        # Mask → dense_prompt path (per-structure, replaces SAM2's mask prompt).
+        self.mask_encoder = _MaskEncoder(out_dim=sam_dim, target_grid=target_grid)
+        self.mask_pos_emb = nn.Parameter(torch.zeros(1, sam_dim, target_grid, target_grid))
+        nn.init.trunc_normal_(self.mask_pos_emb, std=0.02)
+        self.mask_cross_attn = nn.TransformerDecoderLayer(
+            d_model=sam_dim, nhead=4, dim_feedforward=sam_dim * 4,
+            dropout=0.0, activation="gelu", batch_first=True, norm_first=True,
+        )
+        self.dense_out_norm = nn.LayerNorm(sam_dim)
 
     def forward(
         self,
@@ -178,6 +226,35 @@ class _Bridge(nn.Module):
         feat_s0 = self.hr_conv_s0(feat_s0)
 
         return image_emb, [feat_s0, feat_s1]
+
+    def forward_mask(self, image_emb: Tensor, mask: Tensor) -> Tensor:
+        """Build a dense_prompt by cross-attending a mask embedding to image_emb.
+
+        Args:
+            image_emb: [B, sam_dim, g, g] — Bridge output (optionally memory-
+                       enriched upstream; we don't care here, just use as K/V).
+            mask:      [B, 1, H, W]        — pre-RT structure mask (0/1 or
+                       soft). An all-zero mask becomes a learned "no prior"
+                       prompt via the MaskEncoder biases.
+        Returns:
+            dense_prompt: [B, sam_dim, g, g]
+        """
+        B, C, g, gw = image_emb.shape
+        if g != self.target_grid or gw != self.target_grid:
+            raise ValueError(
+                f"image_emb grid {g}×{gw} != Bridge target_grid {self.target_grid}"
+            )
+        mask_emb = self.mask_encoder(mask)                      # [B, C, g, g]
+        mask_emb = mask_emb + self.mask_pos_emb                 # + learned 2D pos
+
+        mask_tokens = mask_emb.flatten(2).transpose(1, 2)       # [B, g·g, C]
+        image_tokens = image_emb.flatten(2).transpose(1, 2)     # [B, g·g, C]
+
+        # TransformerDecoderLayer: self-attn(mask) → cross-attn(mask → image) → FFN.
+        attended = self.mask_cross_attn(tgt=mask_tokens, memory=image_tokens)
+        attended = self.dense_out_norm(attended)
+
+        return attended.transpose(1, 2).view(B, C, g, g).contiguous()
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +325,7 @@ class DinoEncoder(nn.Module):
             dino_dim=self.dino_dim,
             sam_dim=sam_dim,
             num_scales=len(self.feature_layers),
+            target_grid=self.target_grid,
         )
 
     # Keep DINO in eval() even if model.train() is called externally (batchnorm,
@@ -299,3 +377,17 @@ class DinoEncoder(nn.Module):
             multi, h, w, target_h=self.target_grid, target_w=self.target_grid
         )
         return image_emb, high_res
+
+    def encode_mask_prompt(self, image_emb: Tensor, mask: Tensor) -> Tensor:
+        """Run Bridge's mask cross-attention to produce the decoder dense_prompt.
+
+        Galash-style path — replaces SAM2's frozen prompt_encoder(masks=...)
+        entirely. Safe to call with an all-zero `mask` (prompt-dropout / BG
+        slices); MaskEncoder biases act as a learned "no prior" signature.
+
+        Shapes:
+            image_emb [B, sam_dim, target_grid, target_grid]
+            mask      [B, 1, H, W]
+            returns   [B, sam_dim, target_grid, target_grid]
+        """
+        return self.bridge.forward_mask(image_emb, mask)

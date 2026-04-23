@@ -460,6 +460,16 @@ class CSMSAM(nn.Module):
             if torch.rand(1, device=prior_mask.device).item() < self.prompt_dropout:
                 has_prior = False
 
+        # Galash-style decoder path: if the custom image_encoder exposes
+        # encode_mask_prompt, use it (Bridge cross-attends the mask onto
+        # image_emb to produce dense_prompt) and run SAM2 with
+        # multimask_output=False, bypassing SAM2's frozen prompt encoder on
+        # the mask side. Otherwise fall back to SAM2's mask prompt encoder.
+        bridge_mask_path = (
+            self.image_encoder is not None
+            and hasattr(self.image_encoder, "encode_mask_prompt")
+        )
+
         if has_prior:
             low_res_mask_prompt = F.interpolate(
                 prior_mask.float(), size=(256, 256), mode="bilinear", align_corners=False
@@ -477,25 +487,55 @@ class CSMSAM(nn.Module):
         all_masks = None
         iou_pred = None
         try:
-            sparse_embed, dense_embed = self.sam2.sam_prompt_encoder(
-                points=None,  # no centroid/peak point; rely on dense mask or pure image evidence
-                boxes=None,
-                masks=low_res_mask_prompt,
-            )
-            decoder_out = self.sam2.sam_mask_decoder(
-                image_embeddings=image_features,
-                image_pe=self.sam2.sam_prompt_encoder.get_dense_pe(),
-                sparse_prompt_embeddings=sparse_embed,
-                dense_prompt_embeddings=dense_embed,
-                multimask_output=True,
-                repeat_image=False,
-                high_res_features=high_res_features,
-            )
-            # (masks, iou_pred, sam_tokens, object_score_logits); multimask → 3 candidates
-            all_masks, iou_pred = decoder_out[0], decoder_out[1]  # (B,3,h,w), (B,3)
-            best = iou_pred.argmax(dim=1)                          # (B,)
-            idx = best.view(-1, 1, 1, 1).expand(-1, 1, all_masks.shape[-2], all_masks.shape[-1])
-            low_res_masks = all_masks.gather(1, idx)               # (B,1,h,w)
+            if bridge_mask_path:
+                # Empty-sparse placeholder — we still call prompt_enc for the
+                # sparse shape; masks=None so nothing touches SAM2's mask path.
+                sparse_embed, _ = self.sam2.sam_prompt_encoder(
+                    points=None, boxes=None, masks=None,
+                )
+                if sparse_embed.shape[0] != B:
+                    sparse_embed = sparse_embed.expand(B, -1, -1)
+                # Bridge builds dense_prompt by cross-attending the mask onto
+                # image_features. All-zero mask under prompt_dropout / BG →
+                # learned no-prior signature from MaskEncoder biases.
+                mask_for_bridge = prior_mask if has_prior else torch.zeros(
+                    B, 1, 1, 1, device=image_features.device, dtype=image_features.dtype
+                )
+                dense_embed = self.image_encoder.encode_mask_prompt(
+                    image_features, mask_for_bridge
+                )
+                decoder_out = self.sam2.sam_mask_decoder(
+                    image_embeddings=image_features,
+                    image_pe=self.sam2.sam_prompt_encoder.get_dense_pe(),
+                    sparse_prompt_embeddings=sparse_embed,
+                    dense_prompt_embeddings=dense_embed,
+                    multimask_output=False,
+                    repeat_image=False,
+                    high_res_features=high_res_features,
+                )
+                # (masks, iou_pred, sam_tokens, object_score_logits); single mask out
+                low_res_masks, iou_pred = decoder_out[0], decoder_out[1]  # (B,1,h,w), (B,1)
+                all_masks = low_res_masks
+            else:
+                sparse_embed, dense_embed = self.sam2.sam_prompt_encoder(
+                    points=None,  # no centroid/peak point; rely on dense mask or pure image evidence
+                    boxes=None,
+                    masks=low_res_mask_prompt,
+                )
+                decoder_out = self.sam2.sam_mask_decoder(
+                    image_embeddings=image_features,
+                    image_pe=self.sam2.sam_prompt_encoder.get_dense_pe(),
+                    sparse_prompt_embeddings=sparse_embed,
+                    dense_prompt_embeddings=dense_embed,
+                    multimask_output=True,
+                    repeat_image=False,
+                    high_res_features=high_res_features,
+                )
+                # (masks, iou_pred, sam_tokens, object_score_logits); multimask → 3 candidates
+                all_masks, iou_pred = decoder_out[0], decoder_out[1]  # (B,3,h,w), (B,3)
+                best = iou_pred.argmax(dim=1)                          # (B,)
+                idx = best.view(-1, 1, 1, 1).expand(-1, 1, all_masks.shape[-2], all_masks.shape[-1])
+                low_res_masks = all_masks.gather(1, idx)               # (B,1,h,w)
         except Exception as e:
             import traceback, warnings
             warnings.warn(f"SAM2 decoder failed ({e}), using fallback", stacklevel=2)

@@ -54,7 +54,7 @@ loss:
   lambda_consistency: 0.1             # longitudinal feature consistency loss (was 0.5; too loud)
   consistency_fg: 1.0                 # tumor-region weight (inside union mask)
   consistency_bg: 0.1                 # background weight (outside union mask)
-  lambda_iou: 0.1                     # IoU-head supervision (SAM2 multimask best-IoU calibration)
+  lambda_iou: 0.0                     # IoU-head supervision — disabled on tals-local: dino_sam uses multimask_output=False (1 mask, no 3-candidate argmax), so there's nothing to calibrate. Re-enable for encoder_type=sam2 runs.
 
 # ─── Cross-Patient Retrieval ─────────────────────────────────────────────────
 retrieval:
