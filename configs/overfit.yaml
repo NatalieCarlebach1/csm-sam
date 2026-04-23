@@ -19,10 +19,10 @@ model:
   dino_variant: "dinov2_base"
   dino_img_size: 518
   dino_feature_layers: null
-  dino_lora_rank: 32                   # <<< bumped from 8; r=8 fit 4 patients at only 0.013 dice/epoch (too slow to memorize in 100 epochs)
-  dino_lora_alpha: 64                  # keep alpha = 2×rank (standard LoRA scaling)
+  dino_lora_rank: 8                    # back to r=8 (51845 converged smoothly here; r=32 was slower due to 8x larger init noise)
+  dino_lora_alpha: 16                  # alpha = 2×rank (standard LoRA scaling)
   dino_lora_dropout: 0.0               # no dropout in overfit mode
-  dino_lora_targets: ["query", "key", "value", "output.dense"]  # all 4 attention linears (was just Q/V)
+  dino_lora_targets: null              # default ["query","value"]
   d_model: 256
   num_heads: 8
   n_memory_frames: 8

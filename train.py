@@ -870,7 +870,11 @@ def main():
     if args.overfit > 0:
         if is_main(rank):
             print(f"\n*** OVERFIT MODE: using {args.overfit} patients ***\n")
-        cfg.training.lr = 1e-4
+        # Bumped from 1e-4 -> 1e-3: overfit has ~30x fewer optimizer
+        # steps per epoch than full training (4 vs 32 patients × fewer
+        # epochs), so we need a much higher LR to accumulate the same
+        # amount of parameter movement. 1e-4 × 400 steps was too timid.
+        cfg.training.lr = 1e-3
         cfg.training.warmup_epochs = 0
         cfg.training.accumulate_grad_batches = 1
         # Overfit is a memorization test — also kill L2 regularization so
