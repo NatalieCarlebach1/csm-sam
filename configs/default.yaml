@@ -24,7 +24,7 @@ model:
   dino_lora_targets: null               # null → ["query","value"]; try ["query","key","value","output.dense"] for heavier adaptation
   d_model: 256                         # feature dimension (matches SAM2-L)
   num_heads: 8                         # attention heads
-  n_memory_frames: 8                   # pre-RT slices encoded into memory
+  n_memory_frames: 16                  # bumped 8->16: B200 has 180GB, only 33GB used at K=4 — 2x more pre-RT context in M_pre (cheap, no_grad)
   spatial_pool_size: 32                # spatial pool for pre-RT memory encoder (M_pre)
   memory_bank_max_slices: 128          # M_mid cap: span the full mid-RT volume (Option 2: within-volume 3D context via attention, no 3D backbone)
   mid_memory_pool_size: 16             # pool enhanced_feats (h×w=64²=4096) → 16²=256 tokens/slice before appending to M_mid → keeps attention O(N²) tractable at 128-slice memory
@@ -46,7 +46,7 @@ training:
   gradient_clip_norm: 1.0
   amp: true                           # automatic mixed precision
   accumulate_grad_batches: 1          # eff_bs = 16 (bs) × 4 (GPUs) = 64 — no extra accum needed
-  sequence_length: 4                  # number of consecutive mid-RT slices per training step; 1 = single-slice
+  sequence_length: 8                  # bumped 4->8: more mid-RT TBPTT slices per step → 2x more gradient signal. B200 has 180GB, only 33GB used at K=4.
   sequence_mode: true                 # enable sequence training
 
 # ─── Loss ────────────────────────────────────────────────────────────────────
