@@ -152,43 +152,33 @@ def _augment_volume_group(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
 
     img = tensors[0]
     masks = tensors[1:]
-    # Geometric transforms — apply to image and all masks consistently.
+    # SOFTER aug stack: 51882 showed the full nnU-Net-style stack
+    # over-regularized this arch (peak val 0.48 vs 51867's 0.57).
+    # Drop scale jitter entirely, shrink rotation to ±5°, halve most
+    # intensity magnitudes. Keep flips + mild gamma/noise.
     if random.random() < 0.5:
         img = TF.hflip(img); masks = [TF.hflip(m) for m in masks]
-    if random.random() < 0.3:
+    if random.random() < 0.2:
         img = TF.vflip(img); masks = [TF.vflip(m) for m in masks]
-    if random.random() < 0.3:
-        angle = random.uniform(-15.0, 15.0)
+    if random.random() < 0.2:
+        angle = random.uniform(-5.0, 5.0)  # was ±15°
         img = TF.rotate(img, angle, interpolation=TF.InterpolationMode.BILINEAR)
         masks = [TF.rotate(m, angle, interpolation=TF.InterpolationMode.NEAREST) for m in masks]
-    if random.random() < 0.2:
-        scale = random.uniform(0.8, 1.2)
-        img = TF.affine(img, angle=0, translate=(0, 0), scale=scale, shear=0,
-                        interpolation=TF.InterpolationMode.BILINEAR)
-        masks = [TF.affine(m, angle=0, translate=(0, 0), scale=scale, shear=0,
-                           interpolation=TF.InterpolationMode.NEAREST) for m in masks]
+    # Scale jitter REMOVED: tumor size is a clinically relevant cue; augmenting
+    # it hurt (shrinking tumor by 0.8x changes what a small GTVn looks like).
 
-    # Intensity transforms (image only). Images are SAM2-normalized so we
-    # de-normalize -> transform -> re-normalize; but since SAM2 mean/std is
-    # just a linear shift, gamma/brightness on the normalized tensor is
-    # effectively a different (valid) intensity perturbation. Keep it simple.
-    if random.random() < 0.3:
-        gamma = random.uniform(0.7, 1.5)
-        # Gamma on a normalized tensor: shift to [0,1]-ish range, apply, shift back.
+    # Intensity augs — gentler.
+    if random.random() < 0.2:
+        gamma = random.uniform(0.85, 1.15)  # was 0.7-1.5
         img_min = img.min()
         img_rng = (img.max() - img_min).clamp_min(1e-6)
         scaled = ((img - img_min) / img_rng).clamp(0, 1)
         img = scaled.pow(gamma) * img_rng + img_min
-    if random.random() < 0.15:
-        sigma = random.uniform(0.5, 1.0)
-        # gaussian_blur expects odd kernel; choose ~6·σ+1.
-        k = int(2 * round(3 * sigma) + 1)
-        img = TF.gaussian_blur(img, kernel_size=[k, k], sigma=[sigma, sigma])
-    if random.random() < 0.5:
-        sigma = random.uniform(0.0, 0.02)
+    if random.random() < 0.3:
+        sigma = random.uniform(0.0, 0.015)  # was 0-0.02
         img = img + torch.randn_like(img) * sigma
-    if random.random() < 0.4:
-        img = img + random.uniform(-0.1, 0.1)
+    # Blur and brightness-shift REMOVED: blur removes tumor boundary cues,
+    # brightness-shift on SAM2-normalized tensor is effectively noise.
 
     return (img, *masks)
 
