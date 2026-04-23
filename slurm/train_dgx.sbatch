@@ -26,7 +26,7 @@ cd /home/nfs/tals/csm-sam
 # and mask_decoder (trainable at lr*0.1) are kept.
 CONFIG=configs/default.yaml
 DATA_DIR=/home/nfs/tals/csm-sam/data/processed
-SAM2_CKPT=/home/nfs/tals/csm-sam/checkpoints/sam2/sam2.1_hiera_base_plus.pt
+SAM2_CKPT=/home/nfs/tals/csm-sam/checkpoints/sam2/sam2.1_hiera_large.pt
 OUTPUT_DIR=/home/nfs/tals/csm-sam/checkpoints/ralmsam_dino_4gpu_${SLURM_JOB_ID}
 NPROC=4                                   # matches --gres=gpu:4
 
