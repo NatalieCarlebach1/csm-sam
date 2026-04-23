@@ -46,9 +46,18 @@ from csmsam.utils.metrics import evaluate_patient, aggregate_metrics
 # ---------------------------------------------------------------------------
 
 class _CachedSliceDataset(Dataset):
-    """Reads pre-extracted memmap cache for near-instant epoch starts. No RAM load."""
+    """Reads pre-extracted memmap cache for near-instant epoch starts.
 
-    def __init__(self, cache_dir: str, image_size: int = 256, augment: bool = False):
+    Balances tumor vs BG sampling per `tumor_ratio` (mirrors HNTSMRGSliceDataset).
+    """
+
+    def __init__(
+        self,
+        cache_dir: str,
+        image_size: int = 256,
+        augment: bool = False,
+        tumor_ratio: float = 0.7,
+    ):
         cache_dir = Path(cache_dir)
         with open(cache_dir / "meta.json") as f:
             meta = json.load(f)
@@ -60,10 +69,30 @@ class _CachedSliceDataset(Dataset):
         self.pids = meta["patient_ids"]
         self.image_size = image_size
         self.augment = augment
-        print(f"  [CachedSliceDataset] memmap: {N} slices @ {H}x{W} from {cache_dir}")
+        self.tumor_ratio = tumor_ratio
+
+        # Build tumor/bg index from the mid_mask memmap — reads fast (already memmapped)
+        tumor_flags = np.asarray(self.mid_m).reshape(N, -1).any(axis=1)
+        self.tumor_idx = np.where(tumor_flags)[0]
+        self.bg_idx = np.where(~tumor_flags)[0]
+        print(
+            f"  [CachedSliceDataset] memmap: {N} slices @ {H}x{W} from {cache_dir} "
+            f"| tumor={len(self.tumor_idx)} bg={len(self.bg_idx)} tumor_ratio={tumor_ratio}"
+        )
 
     def __len__(self):
-        return len(self.pids)
+        n_tumor = len(self.tumor_idx)
+        if n_tumor == 0:
+            return len(self.pids)
+        n_bg_target = int(n_tumor * (1 - self.tumor_ratio) / self.tumor_ratio)
+        return n_tumor + min(n_bg_target, len(self.bg_idx))
+
+    def _map_index(self, idx: int) -> int:
+        n_tumor = len(self.tumor_idx)
+        if idx < n_tumor:
+            return int(self.tumor_idx[idx])
+        bg_pos = (idx - n_tumor) % max(len(self.bg_idx), 1)
+        return int(self.bg_idx[bg_pos])
 
     def _fast_rgb(self, arr: np.ndarray) -> torch.Tensor:
         """Minimal CPU path: skip F.interpolate when already at target size."""
@@ -89,11 +118,12 @@ class _CachedSliceDataset(Dataset):
         return t.squeeze(0)  # (1,H,W)
 
     def __getitem__(self, idx):
+        real_idx = self._map_index(idx)
         # Cast to float32 only for the ONE slice we return (not the whole array)
-        pre_sl = np.asarray(self.pre[idx], dtype=np.float32)
-        mid_sl = np.asarray(self.mid[idx], dtype=np.float32)
-        pre_m = np.asarray(self.pre_m[idx], dtype=np.float32)
-        mid_m = np.asarray(self.mid_m[idx], dtype=np.float32)
+        pre_sl = np.asarray(self.pre[real_idx], dtype=np.float32)
+        mid_sl = np.asarray(self.mid[real_idx], dtype=np.float32)
+        pre_m = np.asarray(self.pre_m[real_idx], dtype=np.float32)
+        mid_m = np.asarray(self.mid_m[real_idx], dtype=np.float32)
 
         if self.augment:
             import random
@@ -113,7 +143,7 @@ class _CachedSliceDataset(Dataset):
             "mid_image": self._fast_rgb(mid_sl),
             "pre_mask": self._fast_mask(pre_m),
             "mid_mask": self._fast_mask(mid_m),
-            "patient_id": str(self.pids[idx]),
+            "patient_id": str(self.pids[real_idx]),
         }
 
 
@@ -138,14 +168,12 @@ def _dice_loss(pred: torch.Tensor, target: torch.Tensor, smooth: float = 1.0) ->
 
 
 def _combined_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Dice + weighted BCE. Up-weights tumor pixels (~1% of voxels) so the
-    model doesn't collapse to predicting background everywhere."""
-    # Positive class is ~1% of pixels. pos_weight=50 roughly balances the signal.
-    pos_weight = torch.tensor([50.0], device=logits.device)
+    """Dice + moderately-weighted BCE. Dice is naturally class-balanced;
+    we add a mild pos-weighted BCE as regulariser."""
+    pos_weight = torch.tensor([5.0], device=logits.device)
     bce = F.binary_cross_entropy_with_logits(logits, target, pos_weight=pos_weight)
     dice = _dice_loss(logits, target)
-    # Weight Dice heavier to force actual overlap, not just right-classifying background
-    return bce + 2.0 * dice
+    return dice + 0.1 * bce
 
 
 # ---------------------------------------------------------------------------
@@ -243,12 +271,9 @@ def _evaluate_split(
     Fast path: if a memmap cache exists under data_dir/cache/<split>/, group its
     slices by patient and evaluate without touching NIfTI.
     """
-    cache_dir = Path(data_dir) / "cache" / split
-    if (cache_dir / "meta.json").exists():
-        return _evaluate_cached(
-            model, cache_dir, image_size, device, uses_pre, input_adapter, threshold
-        )
-
+    # NOTE: we always use the volume-level NIfTI dataset here. It's slower than
+    # a memmap cache but correct (separate GTVp / GTVn, proper HD95). A cached
+    # variant was removed — it conflated masks and produced ~0 aggDSC.
     dataset = HNTSMRGDataset(data_dir=data_dir, split=split, image_size=image_size)
     per_patient: list[dict] = []
 
@@ -438,6 +463,8 @@ def train_and_evaluate(
 
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
 

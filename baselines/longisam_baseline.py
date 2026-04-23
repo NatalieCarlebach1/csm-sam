@@ -78,6 +78,12 @@ class LongiSAMModel(nn.Module):
             img = fused[b:b + 1]
             backbone_out = self.sam2.forward_image(img)
             features = backbone_out["vision_features"]
+            # New sam2 MaskDecoder expects high_res_features (FPN levels 0, 1).
+            backbone_fpn = backbone_out.get("backbone_fpn", None)
+            if backbone_fpn is not None and len(backbone_fpn) >= 2:
+                high_res_features = [backbone_fpn[0], backbone_fpn[1]]
+            else:
+                high_res_features = None
 
             point_coords = torch.tensor(
                 [[[W / 2, H / 2]]], dtype=torch.float, device=x.device
@@ -89,13 +95,22 @@ class LongiSAMModel(nn.Module):
                 boxes=None,
                 masks=None,
             )
-            low_res_masks, _ = self.sam2.sam_mask_decoder(
+            # Newer sam2 adds `repeat_image` (bool) to MaskDecoder.forward.
+            import inspect
+            md_kwargs = dict(
                 image_embeddings=features,
                 image_pe=self.sam2.sam_prompt_encoder.get_dense_pe(),
                 sparse_prompt_embeddings=sparse_embed,
                 dense_prompt_embeddings=dense_embed,
                 multimask_output=False,
             )
+            md_params = inspect.signature(self.sam2.sam_mask_decoder.forward).parameters
+            if "repeat_image" in md_params:
+                md_kwargs["repeat_image"] = False
+            if "high_res_features" in md_params and high_res_features is not None:
+                md_kwargs["high_res_features"] = high_res_features
+            decoder_out = self.sam2.sam_mask_decoder(**md_kwargs)
+            low_res_masks = decoder_out[0]
             mask = F.interpolate(
                 low_res_masks, size=(H, W), mode="bilinear", align_corners=False
             )

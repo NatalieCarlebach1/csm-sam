@@ -46,12 +46,17 @@ def build_model(image_size: int = 256, device: str = "cuda") -> torch.nn.Module:
         print("ERROR: MONAI not installed.")
         print('Install with: pip install "monai[all]"')
         sys.exit(1)
-    model = SwinUNETR(
-        img_size=(image_size, image_size),
-        in_channels=3,
-        out_channels=1,
-        spatial_dims=2,
-    ).to(device)
+    # Newer MONAI drops `img_size` — infer from input. Older MONAI requires it.
+    try:
+        model = SwinUNETR(
+            in_channels=3, out_channels=1, spatial_dims=2,
+            feature_size=48,
+        ).to(device)
+    except TypeError:
+        model = SwinUNETR(
+            img_size=(image_size, image_size),
+            in_channels=3, out_channels=1, spatial_dims=2,
+        ).to(device)
     return model
 
 

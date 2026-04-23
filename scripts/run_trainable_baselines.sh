@@ -20,12 +20,12 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON="${PYTHON:-/home/tals/miniconda3/envs/ns-sam3/bin/python}"
 DEVICE="${DEVICE:-cuda}"
-EPOCHS="${EPOCHS:-50}"
+EPOCHS="${EPOCHS:-30}"
 LR="${LR:-1e-3}"
 IMAGE_SIZE="${IMAGE_SIZE:-256}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
-TIMEOUT=3600
+TIMEOUT="${TIMEOUT:-10800}"  # 3h per baseline
 
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 

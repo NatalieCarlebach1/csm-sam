@@ -24,6 +24,17 @@ from pathlib import Path
 
 import numpy as np
 from tqdm import tqdm
+from scipy.ndimage import zoom
+
+TARGET_SIZE = 256  # overridden by CLI
+
+
+def resize_slice(arr, size, order):
+    """Resize 2D array to (size, size). order=1 bilinear for image, order=0 nearest for mask."""
+    H, W = arr.shape
+    if H == size and W == size:
+        return arr
+    return zoom(arr, (size / H, size / W), order=order, prefilter=False).astype(arr.dtype)
 
 try:
     import SimpleITK as sitk
@@ -79,7 +90,10 @@ def cache_split(data_dir: Path, split: str, out_root: Path):
     total_slices = sum(s[0] for _, s in sizes)
     max_H = max(s[1] for _, s in sizes)
     max_W = max(s[2] for _, s in sizes)
-    print(f"  {split}: {total_slices} slices, max HxW={max_H}x{max_W}")
+    print(f"  {split}: {total_slices} slices, native max HxW={max_H}x{max_W}")
+    # Pre-resize everything to TARGET_SIZE — drops cache size dramatically.
+    max_H = max_W = TARGET_SIZE
+    print(f"  {split}: caching at {max_H}x{max_W}")
 
     out_dir = out_root / split
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -128,16 +142,10 @@ def cache_split(data_dir: Path, split: str, out_root: Path):
         wk = json.load(open(meta)).get("weeks_elapsed", 3) if meta.exists() else 3
 
         for i in range(N):
-            h, w = pre_vol[i].shape
-            # Pad to max if smaller
-            def pad(a, fill=0):
-                out = np.full((max_H, max_W), fill, dtype=a.dtype)
-                out[:a.shape[0], :a.shape[1]] = a
-                return out
-            pre_mm[cursor] = pad(pre_vol[i]).astype(np.float16)
-            mid_mm[cursor] = pad(mid_vol[i]).astype(np.float16)
-            pre_m_mm[cursor] = pad(pre_mask_vol[i]).astype(np.uint8)
-            mid_m_mm[cursor] = pad(mid_mask_vol[i]).astype(np.uint8)
+            pre_mm[cursor] = resize_slice(pre_vol[i], TARGET_SIZE, order=1).astype(np.float16)
+            mid_mm[cursor] = resize_slice(mid_vol[i], TARGET_SIZE, order=1).astype(np.float16)
+            pre_m_mm[cursor] = resize_slice(pre_mask_vol[i], TARGET_SIZE, order=0).astype(np.uint8)
+            mid_m_mm[cursor] = resize_slice(mid_mask_vol[i], TARGET_SIZE, order=0).astype(np.uint8)
             pids.append(pdir.name)
             sidx.append(i)
             weeks.append(wk)
@@ -169,10 +177,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="data/processed")
     parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--image_size", type=int, default=256,
+                        help="Pre-resize all slices to this square size. Drops cache size ~40x.")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
     out_root = Path(args.output) if args.output else data_dir / "cache"
+    global TARGET_SIZE
+    TARGET_SIZE = args.image_size
 
     print(f"Caching HNTS-MRG slices {data_dir} -> {out_root} (memmap mode)")
     for split in ["train", "val", "test"]:

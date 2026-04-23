@@ -56,14 +56,23 @@ class SiameseUNet(nn.Module):
         fused_channels = [c * 2 for c in enc_channels]
         fused_channels[0] = enc_channels[0]
 
-        self.decoder = UnetDecoder(
+        # smp decoder API differs across versions. Build with the minimal
+        # kwargs that work everywhere; add optional kwargs only if accepted.
+        import inspect
+        decoder_kwargs = dict(
             encoder_channels=fused_channels,
             decoder_channels=decoder_channels,
             n_blocks=len(decoder_channels),
-            use_batchnorm=True,
-            center=False,
             attention_type=None,
         )
+        sig = inspect.signature(UnetDecoder.__init__)
+        if "use_norm" in sig.parameters:
+            decoder_kwargs["use_norm"] = "batchnorm"
+        elif "use_batchnorm" in sig.parameters:
+            decoder_kwargs["use_batchnorm"] = True
+        if "center" in sig.parameters:
+            decoder_kwargs["center"] = False
+        self.decoder = UnetDecoder(**decoder_kwargs)
 
         self.segmentation_head = SegmentationHead(
             in_channels=decoder_channels[-1],
@@ -84,7 +93,15 @@ class SiameseUNet(nn.Module):
         fused = [feats_mid[0]] + [
             torch.cat([p, m], dim=1) for p, m in zip(feats_pre[1:], feats_mid[1:])
         ]
-        return self.segmentation_head(self.decoder(*fused))
+        # smp 0.5 changed forward signature: new takes list, old takes *args
+        import inspect
+        sig = inspect.signature(self.decoder.forward)
+        params = list(sig.parameters)
+        if len(params) == 1 and params[0] not in ("args", "kwargs"):
+            dec_out = self.decoder(fused)  # new API: single list arg
+        else:
+            dec_out = self.decoder(*fused)  # old API: positional
+        return self.segmentation_head(dec_out)
 
 
 def build_model(encoder_name: str = "resnet34", device: str = "cuda") -> nn.Module:
