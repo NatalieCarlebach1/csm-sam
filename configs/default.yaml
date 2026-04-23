@@ -18,7 +18,7 @@ model:
   dino_variant: "dinov2_base"           # used when encoder_type=dino_sam. See csmsam/modeling/dino_encoder.DINO_VARIANTS
   dino_img_size: 518                    # DINO input size (should be a multiple of patch_size; 518 = 37×14)
   dino_feature_layers: null             # null = equally spaced quarter/half/three-quarter/last
-  dino_lora_rank: 0                     # 0 = frozen DINO (default). r=8 adds ~0.4M LoRA params for attention adapt
+  dino_lora_rank: 8                     # LoRA r=8 on Q/V — overfit-4 test (51856) proved arch has capacity with this
   dino_lora_alpha: 16                   # standard LoRA scaling (usually 2× rank)
   dino_lora_dropout: 0.05               # LoRA-only dropout (training)
   dino_lora_targets: null               # null → ["query","value"]; try ["query","key","value","output.dense"] for heavier adaptation
@@ -41,7 +41,7 @@ training:
   epochs: 200
   lr: 2e-4                            # novel modules LR — conservative with decoder now trainable
   lr_decoder: 2e-5                    # SAM2 decoder LR (lr * 0.1 scale)
-  weight_decay: 0.01
+  weight_decay: 1e-4                  # was 1e-2 — UW LAIR uses 1e-5; 1e-4 is conservative middle that lets LoRA adapt
   warmup_epochs: 5                    # short warmup — lets newly-unfrozen decoder settle
   scheduler: "cosine"                 # "cosine" | "step" | "plateau"
   gradient_clip_norm: 1.0
