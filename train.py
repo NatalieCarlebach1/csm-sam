@@ -268,6 +268,7 @@ def train_sequence_epoch(
     cfg,
     epoch: int,
     world_size: int = 1,
+    deterministic_window: bool = False,
 ) -> dict:
     """
     Sequence-mode training with TBPTT, DDP no_sync, and BN-eval fix.
@@ -318,7 +319,17 @@ def train_sequence_epoch(
         S = min(seq_len, N)
         tumor_slice_mask = (mid_masks_combined.flatten(1).sum(dim=1) > 0).cpu().numpy()
         tumor_indices = np.where(tumor_slice_mask)[0]
-        if len(tumor_indices) > 0:
+        # Window selection. For overfit / deterministic runs we pin to the
+        # first tumor-containing index so every epoch trains on IDENTICAL
+        # slices (otherwise random tumor-center picks different K-windows
+        # each epoch → huge train-loss variance that masks any real fitting).
+        if deterministic_window:
+            if len(tumor_indices) > 0:
+                center = int(tumor_indices[len(tumor_indices) // 2])  # middle tumor slice, stable
+            else:
+                center = N // 2
+            start = max(0, min(center - S // 2, N - S))
+        elif len(tumor_indices) > 0:
             center = int(np.random.choice(tumor_indices))
             start = max(0, min(center - S // 2, N - S))
         else:
@@ -972,6 +983,7 @@ def main():
             train_metrics = train_sequence_epoch(
                 model, loaders["train_volumes"], optimizer, scheduler,
                 loss_fn, scaler, device, cfg, epoch, world_size=world_size,
+                deterministic_window=(args.overfit > 0),
             )
         else:
             train_metrics = train_one_epoch(
