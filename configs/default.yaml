@@ -33,7 +33,7 @@ model:
   temporal_encoder_type: "continuous"    # "continuous" (default) | "discrete" (ablation)
   temporal_hidden_dim: 16                 # shrunk: HNTS weeks_elapsed is ~constant (always ~3)
   temporal_n_frequencies: 2               # shrunk: no meaningful temporal variation in HNTS
-  prompt_dropout: 0.5                     # bumped 0.3->0.5 — 51867 was still overfitting past ep35, force model to use image evidence more
+  prompt_dropout: 0.3                     # 0.5 over-regularized when combined with heavier aug (51881 stuck at val 0.175 through ep10). Back to 0.3 — heavier aug is carrying the reg load.
 
 # ─── Training ────────────────────────────────────────────────────────────────
 training:
