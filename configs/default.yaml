@@ -21,7 +21,9 @@ model:
   d_model: 256                         # feature dimension (matches SAM2-L)
   num_heads: 8                         # attention heads
   n_memory_frames: 8                   # pre-RT slices encoded into memory
-  spatial_pool_size: 32                # spatial pool for memory encoding (was 16; less info drop)
+  spatial_pool_size: 32                # spatial pool for pre-RT memory encoder (M_pre)
+  memory_bank_max_slices: 128          # M_mid cap: span the full mid-RT volume (Option 2: within-volume 3D context via attention, no 3D backbone)
+  mid_memory_pool_size: 16             # pool enhanced_feats (h×w=64²=4096) → 16²=256 tokens/slice before appending to M_mid → keeps attention O(N²) tractable at 128-slice memory
   max_weeks: 12                        # max weeks for temporal embedding
   dropout: 0.0                         # attention dropout
   temporal_encoder_type: "continuous"    # "continuous" (default) | "discrete" (ablation)

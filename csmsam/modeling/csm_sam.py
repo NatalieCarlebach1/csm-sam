@@ -54,7 +54,8 @@ class CSMSAM(nn.Module):
         spatial_pool_size: int = 16,
         max_weeks: int = 12,
         dropout: float = 0.0,
-        memory_bank_max_slices: int = 4,
+        memory_bank_max_slices: int = 128,
+        mid_memory_pool_size: int | None = 16,
         temporal_encoder_type: str = "continuous",
         temporal_hidden_dim: int = 128,
         temporal_n_frequencies: int = 6,
@@ -73,6 +74,7 @@ class CSMSAM(nn.Module):
         # high_res_features: list[Tensor] | None). See DinoEncoder.
         self.image_encoder = image_encoder
         self.memory_bank_max_slices = memory_bank_max_slices
+        self.mid_memory_pool_size = mid_memory_pool_size
         self.use_cross_patient_retrieval = use_cross_patient_retrieval
         self.retrieval_n_tokens = retrieval_n_tokens
         self.prompt_dropout = prompt_dropout
@@ -377,14 +379,33 @@ class CSMSAM(nn.Module):
         )
 
         # 4. Update within-session memory.
-        # KEY: do NOT detach during training so the gate learns.
-        # The trailing-window keeps OOM in check.
-        new_memory = enhanced_feats.detach() if detach_memory else enhanced_feats
+        # KEY: do NOT detach during training so the gate learns (within the
+        # TBPTT window — train.py detaches _M_mid after each backward to
+        # prevent cross-window gradient double-counting).
+        #
+        # Volumetric 3D context: we pool the h×w enhanced features to
+        # mid_memory_pool_size before appending, which keeps attention cost
+        # tractable when M_mid grows to span the whole mid-RT volume
+        # (memory_bank_max_slices ≫ TBPTT sequence_length). Without pooling,
+        # 128 slices × 64² = 524k tokens → attention matrices explode.
+        P = self.mid_memory_pool_size
+        if P is not None and P < h:
+            spatial = enhanced_feats.reshape(B, h, w, C).permute(0, 3, 1, 2)  # (B, C, h, w)
+            pooled  = F.adaptive_avg_pool2d(spatial, P)                        # (B, C, P, P)
+            new_memory = pooled.permute(0, 2, 3, 1).reshape(B, P * P, C)       # (B, P², C)
+            tokens_per_slice = P * P
+        else:
+            new_memory = enhanced_feats
+            tokens_per_slice = h * w
+
+        if detach_memory:
+            new_memory = new_memory.detach()
+
         if self._M_mid is None:
             self._M_mid = new_memory
         else:
             self._M_mid = torch.cat([self._M_mid, new_memory], dim=1)
-            max_mid_tokens = self.memory_bank_max_slices * h * w
+            max_mid_tokens = self.memory_bank_max_slices * tokens_per_slice
             if self._M_mid.shape[1] > max_mid_tokens:
                 self._M_mid = self._M_mid[:, -max_mid_tokens:].clone()
 

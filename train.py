@@ -781,6 +781,10 @@ def main():
         if hasattr(cfg.model, "get") else getattr(cfg.model, "dino_img_size", 518)
     dino_feature_layers = cfg.model.get("dino_feature_layers", None) \
         if hasattr(cfg.model, "get") else getattr(cfg.model, "dino_feature_layers", None)
+    memory_bank_max_slices = cfg.model.get("memory_bank_max_slices", 128) \
+        if hasattr(cfg.model, "get") else getattr(cfg.model, "memory_bank_max_slices", 128)
+    mid_memory_pool_size = cfg.model.get("mid_memory_pool_size", 16) \
+        if hasattr(cfg.model, "get") else getattr(cfg.model, "mid_memory_pool_size", 16)
 
     model = CSMSAM.from_pretrained(
         sam2_checkpoint=cfg.model.sam2_checkpoint,
@@ -799,6 +803,8 @@ def main():
         temporal_hidden_dim=temporal_hidden_dim,
         temporal_n_frequencies=temporal_n_frequencies,
         prompt_dropout=prompt_dropout,
+        memory_bank_max_slices=memory_bank_max_slices,
+        mid_memory_pool_size=mid_memory_pool_size,
     ).to(device)
 
     if is_main(rank):
