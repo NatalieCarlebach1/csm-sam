@@ -413,7 +413,15 @@ class CSMSAM(nn.Module):
 
         # 7. Change map
         if return_change_map and pre_images is not None:
-            pre_feats, _ = self._get_sam2_features(pre_images)
+            # pre_feats is only a static comparison target for the change head —
+            # Bridge already gets gradients through enhanced_feats_spatial (mid
+            # path) and through encode_pre_rt's memory path. Letting grads flow
+            # through a SECOND DINO forward per slice here is what blew VRAM in
+            # sequence mode (seq_len=4 × retain_graph → 8× DINO activations on
+            # a 16GB GPU). The change head still learns: its weights and the
+            # enhanced_feats_spatial branch remain in autograd.
+            with torch.no_grad():
+                pre_feats, _ = self._get_sam2_features(pre_images)
             change_logits = self.change_head(pre_feats, enhanced_feats_spatial)
             change_logits = F.interpolate(change_logits, size=(H, W), mode="bilinear", align_corners=False)
             result["change_map"] = change_logits
