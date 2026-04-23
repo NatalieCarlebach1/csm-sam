@@ -23,6 +23,8 @@ model:
   temporal_encoder_type: "continuous"    # "continuous" (default) | "discrete" (ablation)
   temporal_hidden_dim: 16                 # shrunk: HNTS weeks_elapsed is ~constant (always ~3)
   temporal_n_frequencies: 2               # shrunk: no meaningful temporal variation in HNTS
+  prompt_dropout: 0.3                     # fraction of train steps that drop the pre-RT mask prompt
+                                          # (breaks the "just copy the prior" overfit seen on 51652)
 
 # ─── Training ────────────────────────────────────────────────────────────────
 training:

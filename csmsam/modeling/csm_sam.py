@@ -434,6 +434,16 @@ class CSMSAM(nn.Module):
         H, W = output_size
 
         has_prior = prior_mask is not None and prior_mask.sum() > 0
+
+        # Training-only prompt dropout: with probability self.prompt_dropout
+        # we drop the mask prompt even when one is available. This prevents
+        # the model from collapsing to "just output the prior" — a failure
+        # mode observed on 51652 (val peaked ep20 then decayed monotonically
+        # while train DSC kept climbing).
+        if has_prior and self.training and self.prompt_dropout > 0:
+            if torch.rand(1, device=prior_mask.device).item() < self.prompt_dropout:
+                has_prior = False
+
         if has_prior:
             low_res_mask_prompt = F.interpolate(
                 prior_mask.float(), size=(256, 256), mode="bilinear", align_corners=False

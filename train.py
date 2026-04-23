@@ -753,6 +753,8 @@ def main():
         if hasattr(cfg.model, "get") else getattr(cfg.model, "temporal_hidden_dim", 128)
     temporal_n_frequencies = cfg.model.get("temporal_n_frequencies", 6) \
         if hasattr(cfg.model, "get") else getattr(cfg.model, "temporal_n_frequencies", 6)
+    prompt_dropout = cfg.model.get("prompt_dropout", 0.0) \
+        if hasattr(cfg.model, "get") else getattr(cfg.model, "prompt_dropout", 0.0)
 
     model = CSMSAM.from_pretrained(
         sam2_checkpoint=cfg.model.sam2_checkpoint,
@@ -766,6 +768,7 @@ def main():
         temporal_encoder_type=temporal_encoder_type,
         temporal_hidden_dim=temporal_hidden_dim,
         temporal_n_frequencies=temporal_n_frequencies,
+        prompt_dropout=prompt_dropout,
     ).to(device)
 
     if is_main(rank):
