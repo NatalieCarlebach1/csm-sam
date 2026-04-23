@@ -39,6 +39,35 @@ from csmsam.utils.metrics import (
 )
 
 
+def _cc_gate(pred_vol: np.ndarray, prior_vol: np.ndarray) -> np.ndarray:
+    """Drop 3D connected components with ZERO overlap to the registered pre-RT prior.
+
+    UW LAIR's (HNTS-MRG 2024 Task 2 winner, 0.733) post-processing rule:
+    for each connected component in the prediction, if it does not overlap
+    at all with the deformably-registered pre-RT mask, treat it as a false
+    positive and drop it. Adds ~+0.01-0.03 aggDSC on HNTS-MRG Task 2.
+
+    Args:
+        pred_vol  : (N, H, W) bool — predicted structure volume
+        prior_vol : (N, H, W) — registered pre-RT mask (same structure).
+                    Zero-filled tensors (patient without *_registered.nii.gz)
+                    will drop every CC — guard: if prior is empty, passthrough.
+    Returns:
+        filtered pred_vol (same shape, same dtype)
+    """
+    if pred_vol.sum() == 0 or prior_vol.sum() == 0:
+        return pred_vol
+    from scipy.ndimage import label as ndi_label
+    labels, n_cc = ndi_label(pred_vol.astype(bool), structure=np.ones((3, 3, 3)))
+    keep = np.zeros_like(pred_vol, dtype=bool)
+    prior_bool = prior_vol > 0.5
+    for c in range(1, n_cc + 1):
+        cc = (labels == c)
+        if (cc & prior_bool).any():
+            keep |= cc
+    return keep.astype(pred_vol.dtype)
+
+
 def _forward_logits(
     model: CSMSAM,
     mid_slice: torch.Tensor,
@@ -70,6 +99,7 @@ def inference_patient(
     threshold: float = 0.5,
     voxel_spacing: tuple = (3.0, 1.0, 1.0),
     tta: bool = False,
+    postproc: bool = False,
 ) -> tuple[dict, dict]:
     """
     Run full 3D inference on one patient.
@@ -179,6 +209,16 @@ def inference_patient(
 
     pred_gtvp_vol = (torch.sigmoid(gtvp_logits) > threshold).numpy()  # (N, H, W)
     pred_gtvn_vol = (torch.sigmoid(gtvn_logits) > threshold).numpy()  # (N, H, W)
+
+    # UW LAIR post-processing: CC with zero overlap to registered pre-RT prior → drop.
+    if postproc:
+        prior_gtvp = patient_data.get("pre_mask_registered_gtvp")
+        prior_gtvn = patient_data.get("pre_mask_registered_gtvn")
+        if prior_gtvp is not None:
+            pred_gtvp_vol = _cc_gate(pred_gtvp_vol, prior_gtvp.squeeze(1).numpy())
+        if prior_gtvn is not None:
+            pred_gtvn_vol = _cc_gate(pred_gtvn_vol, prior_gtvn.squeeze(1).numpy())
+
     pred_combined = (pred_gtvp_vol | pred_gtvn_vol).astype(bool)
 
     # Ground truth (real per-structure)
@@ -256,6 +296,8 @@ def main():
     parser.add_argument("--save_nifti", action="store_true", help="Save prediction NIfTI files")
     parser.add_argument("--compare", type=str, default=None, help="Path to baselines results dir for comparison table")
     parser.add_argument("--tta", action="store_true", help="Horizontal-flip test-time augmentation")
+    parser.add_argument("--postproc", action="store_true",
+                        help="UW-LAIR-style post-proc: drop 3D CCs with zero overlap to registered pre-RT mask")
     parser.add_argument("--fold", type=int, default=None, help="K-fold index (0-based). Requires --n_folds.")
     parser.add_argument("--n_folds", type=int, default=None, help="Total folds for K-fold CV.")
     args = parser.parse_args()
@@ -343,6 +385,7 @@ def main():
             predictions, metrics = inference_patient(
                 model, patient_data, device, args.threshold, voxel_spacing,
                 tta=args.tta,
+                postproc=args.postproc,
             )
             metrics["patient_id"] = pid
             per_patient_metrics.append(metrics)
