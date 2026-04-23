@@ -46,7 +46,7 @@ training:
   gradient_clip_norm: 1.0
   amp: true                           # automatic mixed precision
   accumulate_grad_batches: 1          # eff_bs = 16 (bs) × 4 (GPUs) = 64 — no extra accum needed
-  sequence_length: 8                  # bumped 4->8: more mid-RT TBPTT slices per step → 2x more gradient signal. B200 has 180GB, only 33GB used at K=4.
+  sequence_length: 16                 # 4->16: 4x more mid-RT TBPTT slices per step. Will push VRAM near B200 limit (~160GB estimated).
   sequence_mode: true                 # enable sequence training
 
 # ─── Loss ────────────────────────────────────────────────────────────────────
