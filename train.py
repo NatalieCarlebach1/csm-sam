@@ -597,10 +597,10 @@ def _apply_kfold(
         cfg.data.data_dir, split="train", image_size=image_size, augment=True
     )
     train_vol_ds = HNTSMRGDataset(
-        cfg.data.data_dir, split="train", image_size=image_size
+        cfg.data.data_dir, split="train", image_size=image_size, augment=True
     )
     val_vol_ds = HNTSMRGDataset(
-        cfg.data.data_dir, split="train", image_size=image_size
+        cfg.data.data_dir, split="train", image_size=image_size, augment=False
     )
 
     try:
@@ -927,7 +927,11 @@ def main():
     if sequence_mode and "train_volumes" not in loaders:
         if is_main(rank):
             print("  Building volume loader for sequence training...")
-        ds = HNTSMRGDataset(cfg.data.data_dir, split="train", image_size=cfg.data.image_size)
+        # Train volume loader — augment ON for train (aug=False for --overfit).
+        ds = HNTSMRGDataset(
+            cfg.data.data_dir, split="train", image_size=cfg.data.image_size,
+            augment=(args.overfit == 0),
+        )
         if args.overfit > 0:
             ds = Subset(ds, list(range(min(args.overfit, len(ds)))))
         sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True) if world_size > 1 else None

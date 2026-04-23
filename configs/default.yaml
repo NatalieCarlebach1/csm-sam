@@ -33,15 +33,14 @@ model:
   temporal_encoder_type: "continuous"    # "continuous" (default) | "discrete" (ablation)
   temporal_hidden_dim: 16                 # shrunk: HNTS weeks_elapsed is ~constant (always ~3)
   temporal_n_frequencies: 2               # shrunk: no meaningful temporal variation in HNTS
-  prompt_dropout: 0.3                     # fraction of train steps that drop the pre-RT mask prompt
-                                          # (breaks the "just copy the prior" overfit seen on 51652)
+  prompt_dropout: 0.5                     # bumped 0.3->0.5 — 51867 was still overfitting past ep35, force model to use image evidence more
 
 # ─── Training ────────────────────────────────────────────────────────────────
 training:
   epochs: 200
   lr: 2e-4                            # novel modules LR — conservative with decoder now trainable
   lr_decoder: 2e-5                    # SAM2 decoder LR (lr * 0.1 scale)
-  weight_decay: 1e-4                  # was 1e-2 — UW LAIR uses 1e-5; 1e-4 is conservative middle that lets LoRA adapt
+  weight_decay: 5e-4                  # bumped from 1e-4 — 51867 overfit past ep35 (train DSC 0.75, val 0.53). A4 tightening.
   warmup_epochs: 5                    # short warmup — lets newly-unfrozen decoder settle
   scheduler: "cosine"                 # "cosine" | "step" | "plateau"
   gradient_clip_norm: 1.0

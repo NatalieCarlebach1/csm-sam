@@ -131,6 +131,68 @@ def to_mask_tensor(mask_2d: np.ndarray, size: int = SAM2_IMAGE_SIZE) -> torch.Te
     return t.squeeze(0)  # (1, size, size)
 
 
+def _augment_volume_group(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """nnU-Net-style aug on a group of spatially-aligned (N, C, H, W) tensors.
+
+    One set of random transforms per call, applied consistently across all
+    tensors in the group. The first tensor is treated as the intensity image
+    (gets gamma / noise / brightness / blur); subsequent tensors are masks
+    (geometry only, nearest-neighbor interpolation).
+
+    Augmentations (with per-transform probabilities):
+      - hflip (0.5), vflip (0.3)
+      - rotation ±15° (0.3)
+      - scale 0.8-1.2 (0.2)
+      - gamma 0.7-1.5 (0.3) — image only
+      - Gaussian blur σ 0.5-1.0 (0.15) — image only
+      - Gaussian noise σ 0-0.02 (0.5) — image only
+      - brightness ±0.1 (0.4) — image only
+    """
+    import torchvision.transforms.functional as TF
+
+    img = tensors[0]
+    masks = tensors[1:]
+    # Geometric transforms — apply to image and all masks consistently.
+    if random.random() < 0.5:
+        img = TF.hflip(img); masks = [TF.hflip(m) for m in masks]
+    if random.random() < 0.3:
+        img = TF.vflip(img); masks = [TF.vflip(m) for m in masks]
+    if random.random() < 0.3:
+        angle = random.uniform(-15.0, 15.0)
+        img = TF.rotate(img, angle, interpolation=TF.InterpolationMode.BILINEAR)
+        masks = [TF.rotate(m, angle, interpolation=TF.InterpolationMode.NEAREST) for m in masks]
+    if random.random() < 0.2:
+        scale = random.uniform(0.8, 1.2)
+        img = TF.affine(img, angle=0, translate=(0, 0), scale=scale, shear=0,
+                        interpolation=TF.InterpolationMode.BILINEAR)
+        masks = [TF.affine(m, angle=0, translate=(0, 0), scale=scale, shear=0,
+                           interpolation=TF.InterpolationMode.NEAREST) for m in masks]
+
+    # Intensity transforms (image only). Images are SAM2-normalized so we
+    # de-normalize -> transform -> re-normalize; but since SAM2 mean/std is
+    # just a linear shift, gamma/brightness on the normalized tensor is
+    # effectively a different (valid) intensity perturbation. Keep it simple.
+    if random.random() < 0.3:
+        gamma = random.uniform(0.7, 1.5)
+        # Gamma on a normalized tensor: shift to [0,1]-ish range, apply, shift back.
+        img_min = img.min()
+        img_rng = (img.max() - img_min).clamp_min(1e-6)
+        scaled = ((img - img_min) / img_rng).clamp(0, 1)
+        img = scaled.pow(gamma) * img_rng + img_min
+    if random.random() < 0.15:
+        sigma = random.uniform(0.5, 1.0)
+        # gaussian_blur expects odd kernel; choose ~6·σ+1.
+        k = int(2 * round(3 * sigma) + 1)
+        img = TF.gaussian_blur(img, kernel_size=[k, k], sigma=[sigma, sigma])
+    if random.random() < 0.5:
+        sigma = random.uniform(0.0, 0.02)
+        img = img + torch.randn_like(img) * sigma
+    if random.random() < 0.4:
+        img = img + random.uniform(-0.1, 0.1)
+
+    return (img, *masks)
+
+
 class _VolumeCache:
     """
     LRU cache of normalized patient volumes.
@@ -237,6 +299,7 @@ class HNTSMRGDataset(Dataset):
         image_size: int = SAM2_IMAGE_SIZE,
         min_mid_tumor_slices: int = 1,
         volume_cache: Optional[_VolumeCache] = None,
+        augment: bool = False,
     ):
         """
         Args:
@@ -245,11 +308,18 @@ class HNTSMRGDataset(Dataset):
             image_size : SAM2 input resolution
             min_mid_tumor_slices: filter patients with fewer than N mid-RT tumor slices
             volume_cache: optional shared volume cache
+            augment    : apply nnU-Net-style aug (rotation, scale, gamma, blur,
+                         flips, noise, brightness). Only fires when split=="train".
+                         Prior to 2026-04-24 this dataset had NO aug path at all,
+                         which caused a 0.18-pt train-val DSC gap in sequence-mode
+                         runs (51702/51742/51867). Enabling aug regularizes the
+                         volume-level path that sequence training feeds from.
         """
         self.data_dir = Path(data_dir) / split
         self.image_size = image_size
         self.split = split
         self.volume_cache = volume_cache
+        self.augment = augment and (split == "train")
 
         self.patient_dirs = sorted([
             d for d in self.data_dir.iterdir()
@@ -342,6 +412,22 @@ class HNTSMRGDataset(Dataset):
         pre_mask_reg_gtvp = torch.stack([to_mask_tensor(pre_gtvp_reg[i], self.image_size) for i in range(N)])
         pre_mask_reg_gtvn = torch.stack([to_mask_tensor(pre_gtvn_reg[i], self.image_size) for i in range(N)])
         pre_images_registered = torch.stack([to_rgb_tensor(pre_vol_reg[i], self.image_size) for i in range(N)])
+
+        # nnU-Net-style augmentation (train-only). Keys are grouped by grid:
+        #   Group A (mid-RT grid): mid_images, mid_masks_*, pre_images_registered,
+        #                           pre_mask_reg_* — share ONE transform decision
+        #   Group B (pre-RT grid): pre_images, pre_masks_* — separate transform
+        # This preserves spatial correspondence within each grid while still
+        # augmenting both streams.
+        if self.augment:
+            (mid_images, mid_masks_gtvp, mid_masks_gtvn,
+             pre_images_registered, pre_mask_reg_gtvp, pre_mask_reg_gtvn) = _augment_volume_group(
+                mid_images, mid_masks_gtvp, mid_masks_gtvn,
+                pre_images_registered, pre_mask_reg_gtvp, pre_mask_reg_gtvn,
+            )
+            pre_images, pre_masks_gtvp, pre_masks_gtvn = _augment_volume_group(
+                pre_images, pre_masks_gtvp, pre_masks_gtvn,
+            )
 
         return {
             "pre_images": pre_images,                              # (N, 3, H, W)
