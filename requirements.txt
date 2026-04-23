@@ -17,6 +17,8 @@ scikit-image>=0.22.0
 # Training utilities
 einops>=0.7.0
 timm>=0.9.12
+transformers>=4.40.0   # required by csmsam.modeling.dino_encoder (DINOv2 via HF AutoModel)
+huggingface_hub>=0.23.0
 tqdm>=4.66.0
 wandb>=0.16.0
 omegaconf>=2.3.0

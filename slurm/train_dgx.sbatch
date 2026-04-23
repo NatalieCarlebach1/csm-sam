@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=csmsam-bplus-4gpu
+#SBATCH --job-name=ralmsam-dino-4gpu
 #SBATCH --partition=dgx
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=1000G
 #SBATCH --time=3-00:00:00
-#SBATCH --output=/home/nfs/tals/csm-sam/logs/csmsam_%j.out
-#SBATCH --error=/home/nfs/tals/csm-sam/logs/csmsam_%j.err
+#SBATCH --output=/home/nfs/tals/csm-sam/logs/ralmsam_%j.out
+#SBATCH --error=/home/nfs/tals/csm-sam/logs/ralmsam_%j.err
 
 set -euo pipefail
 
@@ -17,11 +17,17 @@ conda activate ns-sam3
 
 cd /home/nfs/tals/csm-sam
 
-# ── Config knobs (SOTA: SAM2-L @ 1024) ────────────────────────────────────────
+# ── Config knobs ──────────────────────────────────────────────────────────────
+# configs/default.yaml defaults on tals-local:
+#   encoder_type: dino_sam       (frozen DINOv2-base + trainable Bridge)
+#   sequence_mode: true, sequence_length: 4
+#   multimask_output: false  (lambda_iou=0)
+# SAM2 checkpoint is still needed: its prompt_encoder (for sparse placeholder)
+# and mask_decoder (trainable at lr*0.1) are kept.
 CONFIG=configs/default.yaml
 DATA_DIR=/home/nfs/tals/csm-sam/data/processed
 SAM2_CKPT=/home/nfs/tals/csm-sam/checkpoints/sam2/sam2.1_hiera_base_plus.pt
-OUTPUT_DIR=/home/nfs/tals/csm-sam/checkpoints/csmsam_bplus_4gpu_${SLURM_JOB_ID}
+OUTPUT_DIR=/home/nfs/tals/csm-sam/checkpoints/ralmsam_dino_4gpu_${SLURM_JOB_ID}
 NPROC=4                                   # matches --gres=gpu:4
 
 mkdir -p "$OUTPUT_DIR"
@@ -37,14 +43,19 @@ export HYDRA_FULL_ERROR=1                 # clearer SAM2 hydra errors
 echo "=============================================================="
 echo " Job:        $SLURM_JOB_ID on $SLURM_NODELIST"
 echo " GPUs:       $NPROC (B200)"
-echo " Config:     $CONFIG (image_size=1024, sam2_cfg=configs/sam2.1/sam2.1_hiera_l)"
+echo " Encoder:    DINOv2-base @ 518 + Bridge (see configs/default.yaml)"
+echo " Mode:       sequence training (S=4)"
+echo " Config:     $CONFIG"
 echo " Data:       $DATA_DIR"
-echo " Checkpoint: $SAM2_CKPT"
+echo " SAM2 ckpt:  $SAM2_CKPT  (prompt_enc frozen, mask_decoder trainable lr×0.1)"
 echo " Output:     $OUTPUT_DIR"
 echo "=============================================================="
 nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader || true
 
 # ── Train ────────────────────────────────────────────────────────────────────
+# Sequence mode (config default) stays on — without it the within-session
+# memory M_mid never accumulates across slices and the gate doesn't learn.
+# Pass --no_sequence_train only for an ablation row.
 torchrun \
     --standalone \
     --nproc_per_node="$NPROC" \
@@ -53,7 +64,6 @@ torchrun \
     --data_dir "$DATA_DIR" \
     --sam2_checkpoint "$SAM2_CKPT" \
     --output_dir "$OUTPUT_DIR" \
-    --no_sequence_train \
     --no_wandb
 
 echo ""

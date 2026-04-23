@@ -23,13 +23,25 @@ We recast mid-treatment segmentation as a **longitudinal distribution-shift** pr
 ## Method
 
 ```
-Pre-RT  ─► SAM2 Enc ─► M_pre ─┐
-                               ├─► M_aug ─► CrossSessionAttn ─► Decoder ─► (GTVp, GTVn)
-Bank ── top-K retrieval ──►  ──┘                │
-                                                ├─► ChangeHead   (auxiliary)
-                                                └─► EvolutionPred → Consistency Loss
-Mid-RT  ─► SAM2 Enc ─► M_mid ──► CrossSessionAttn (same block)
+Pre-RT  ─► Encoder ─► M_pre ─┐
+                              ├─► M_aug ─► CrossSessionAttn ─► enhanced_feats ─┐
+Bank ─ top-K retrieval ─►  ──┘                │                                │
+                                              ├─► ChangeHead   (aux)           │
+                                              └─► EvolutionPred → L_cons       ▼
+                                                                  SAM2 Mask Decoder ─► (GTVp, GTVn)
+Mid-RT  ─► Encoder ─► mid_feats                                         ▲
+                                                              dense_prompt
+                          pre-RT mask ─► Bridge MaskEncoder ─► cross-attn ─┘
+                                         (galash path, encoder_type=dino_sam)
 ```
+
+**Encoder (`model.encoder_type`).**
+- `sam2` — original: frozen SAM2.1 Hiera (Base+ or Large), ~2.9 M trainable (attention, memory encoder, change head, retrieval) + ~4 M SAM2 mask-decoder at `lr×0.1`.
+- `dino_sam` — new, default on `tals-local` branch: **frozen DINOv2** (`facebook/dinov2-base` at 518 → 37×37 patch grid) + **trainable Bridge (~13.9 M)** that fuses 4 equally-spaced DINO hidden-states into the SAM2 decoder's expected feature pyramid. Ported from a prior change-detection pipeline. The claim — *frozen DINOv2 beats SAM2-Hiera for medical image features* — is supported by a separate 11-backbone KiTS19 ablation where DINOv2-Base @ 518 wins tumor Dice by +6 pts over SAM2-Hiera.
+
+**Mask handling differs by encoder path:**
+- `sam2`: pre-RT mask → frozen SAM2 prompt_encoder → `dense_embed`; decoder called with `multimask_output=True` (argmax over 3 candidates), `lambda_iou=0.1`.
+- `dino_sam`: pre-RT mask → **Bridge `MaskEncoder` + learned 2D pos-emb → TransformerDecoderLayer(mask_tokens ↔ image_emb)** → `dense_prompt`. Decoder called with `multimask_output=False` (1 mask per structure), `lambda_iou=0.0`. Empty masks (BG slices, prompt dropout) yield a learned "no prior" signature from MaskEncoder biases.
 
 **CrossSessionMemoryAttention**
 - Cross-session attention: mid-RT features attend to the augmented memory `M_aug = [M_pre ; retrieved change templates]`, conditioned on the continuous-time embedding f(t).
@@ -38,19 +50,23 @@ Mid-RT  ─► SAM2 Enc ─► M_mid ──► CrossSessionAttn (same block)
 
 **CrossPatientRetrieval**. For every training patient the bank stores a pre-RT embedding key and a set of change templates obtained by spatial-pooling `(mid_features - pre_features)` at tumor locations. At inference, cosine similarity over pre-RT keys selects the top-K donors whose templates are injected into M_aug.
 
-**ChangeHead (auxiliary).** 3-class prediction (stable / grown / shrunk), supervised by XOR-derived labels from pre/mid masks — no extra annotation required.
+**ChangeHead (auxiliary).** 3-class prediction (stable / grown / shrunk), supervised by XOR-derived labels from pre/mid masks — no extra annotation required. Under `dino_sam`, `pre_feats` for the change head is extracted in `torch.no_grad()` (sequence-mode OOM fix: otherwise a second DINO autograd chain per slice blows a 16 GB GPU at `seq_len=4`).
 
 **FeatureEvolutionPredictor (auxiliary).** Predicts mid-RT tumor-region features from pre-RT features and weeks-elapsed; the MSE between predicted and actual mid-RT features enters the loss as `lambda_consistency * L_cons`.
 
-**Losses.** `L = L_dice + 0.3 * L_ce(change_map) + 0.2 * L_consistency` (coefficients configurable).
+**Losses.** `L = L_dice + 0.5 * L_bce + 0.1 * L_change + 0.1 * L_cons + lambda_iou * L_iou` (coefficients in `configs/default.yaml`). `lambda_iou` is 0.0 under `dino_sam` (multimask=False) and 0.1 under `sam2`.
 
-**Parameter budget.** Frozen SAM2 image encoder (ViT-H) and most of the mask decoder. Trainable: `CrossSessionMemoryAttention`, `ChangeHead`, continuous-time encoder, `CrossPatientRetrieval`, `FeatureEvolutionPredictor`, and the final mask decoder layer — roughly 2M parameters.
+**Parameter budget.**
+- `sam2`: frozen SAM2-Hiera encoder; ~2.9 M trainable + ~4 M SAM2 mask-decoder at lr×0.1 ≈ **7 M**.
+- `dino_sam`: frozen DINOv2-base; ~2.9 M + **~16.3 M Bridge** (13.9 M fusion path + 2.4 M mask cross-attn) + ~4 M SAM2 mask-decoder at lr×0.1 ≈ **23 M**.
 
 ## Ablations
 
 | Variant                               | aggDSC |
 | ------------------------------------- | ------ |
-| RALM-SAM (full)                       | TBD    |
+| RALM-SAM (full, `dino_sam`)           | TBD    |
+| — encoder_type=`sam2` (Hiera baseline)| TBD    |
+| — mask via SAM2 prompt_enc instead of Bridge cross-attn | TBD    |
 | — no cross-patient retrieval          | TBD    |
 | — discrete temporal embed (CSM-SAM)   | TBD    |
 | — no change map                       | TBD    |
@@ -129,34 +145,48 @@ python data/preprocess.py \
 ## Training
 
 ```bash
-# Default training: RALM-SAM with sequence mode on fold 0 of 5-fold CV
+# Default training — configs/default.yaml has encoder_type=dino_sam, sequence_mode=true
 python train.py \
     --config configs/default.yaml \
     --sequence_train \
     --fold 0 --n_folds 5
 
-# Full override example
-python train.py \
-    --config configs/default.yaml \
-    --sequence_train \
+# Local single-GPU (no SLURM), bs=2 — matches RTX 40-series 16 GB budget
+bash scripts/train_local.sh
+
+# SLURM: single GPU or 4-GPU DGX (DDP via torchrun)
+sbatch slurm/train_single.sbatch
+sbatch slurm/train_dgx.sbatch
+
+# Explicit overrides — toggle encoder or DINO variant from CLI
+python train.py --config configs/default.yaml \
+    --encoder_type dino_sam \
+    --dino_variant dinov2_base \
+    --batch_size 2 --num_workers 2 \
     --fold 0 --n_folds 5 \
-    --batch_size 4 \
-    --lr 1e-4 \
-    --epochs 200 \
-    --sam2_checkpoint checkpoints/sam2/sam2.1_hiera_large.pt \
-    --data_dir data/processed \
     --output_dir checkpoints/ralmsam_run1
+
+# Baseline ablation: swap back to SAM2-Hiera encoder
+python train.py --config configs/default.yaml --encoder_type sam2 ...
 
 # Resume training
 python train.py --config configs/default.yaml --resume checkpoints/ralmsam_run1/latest.pth
 ```
 
-Key flags:
-- `--sequence_train` enables sequence-mode training (M_mid accumulated across consecutive slices).
+Key CLI flags:
+- `--encoder_type {sam2, dino_sam}` — encoder swap; `dino_sam` is the default on `tals-local`.
+- `--dino_variant {dinov2_small, dinov2_base, dinov2_large}` — DINO model size. `dinov2_base` is the ablation-validated choice.
+- `--sequence_train` / `--no_sequence_train` — toggle within-session memory accumulation. Sequence mode is required to train the gate + `M_mid` attention.
+- `--batch_size`, `--num_workers`, `--prefetch_factor` — dataloader knobs. Don't combine `num_workers=8` with `prefetch_factor>=4` on a desktop-class box; it can stall the host.
 - `--fold` / `--n_folds` select the K-fold CV split.
-- Set `temporal_encoder_type: discrete` in the config to train the CSM-SAM ablation.
-- Set `retrieval.enabled: false` to ablate cross-patient retrieval.
-- Set `loss.lambda_consistency: 0.0` to ablate the evolution consistency loss.
+- `--overfit N` — memorize N slices for a sanity check (skips validation, forces `bs=n`, `shuffle=False`, `prompt_dropout=0`, disables periodic checkpoints).
+
+Config ablation toggles (in `configs/default.yaml`):
+- `model.encoder_type: sam2 | dino_sam`
+- `model.temporal_encoder_type: continuous | discrete` — CSM-SAM ablation uses `discrete`.
+- `retrieval.enabled: false` to ablate cross-patient retrieval.
+- `loss.lambda_consistency: 0.0` to ablate the evolution consistency loss.
+- `training.sequence_mode: false` to ablate sequence training.
 
 ## Building the Cross-Patient Bank
 
@@ -252,7 +282,8 @@ csm-sam/
 │   │   ├── cross_session_memory_attention.py   # Cross-session + within-session attention with gating
 │   │   ├── retrieval.py                        # CrossPatientBank, CrossPatientRetrieval
 │   │   ├── csm_sam.py                          # Full RALM-SAM model (CSM-SAM = ablation)
-│   │   └── change_head.py                      # 3-class change prediction
+│   │   ├── change_head.py                      # 3-class change prediction
+│   │   └── dino_encoder.py                     # Frozen DINOv2 + trainable Bridge (with mask cross-attn)
 │   ├── datasets/
 │   │   └── hnts_mrg.py                         # Dataset + augmentation + sequence sampler
 │   ├── losses/
@@ -285,7 +316,11 @@ csm-sam/
 │   └── tables/                                 # per-dataset booktabs tables
 ├── scripts/
 │   ├── run_all_baselines.sh                    # End-to-end baseline sweep
+│   ├── train_local.sh                          # No-SLURM launcher (bs=2, dino_sam)
 │   └── build_bank.py                           # (forthcoming) build CrossPatientBank over train split
+├── slurm/
+│   ├── train_single.sbatch                     # Single-GPU DGX training
+│   └── train_dgx.sbatch                        # 4-GPU DGX (DDP via torchrun)
 ├── configs/
 │   ├── default.yaml                            # RALM-SAM config
 │   └── baselines.yaml                          # Baseline configs

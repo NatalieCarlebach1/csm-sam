@@ -11,16 +11,33 @@ This repository implements **RALM-SAM** — a retrieval-augmented longitudinal m
 **Preprocessing note**: All top-5 teams consume the organizer-supplied **deformably-registered pre-RT mask** (`pre_GTVp_registered.nii.gz` / `pre_GTVn_registered.nii.gz`) as a model input (either concatenated channel or mask-aware attention prior). They also resample to ~1×1×1 mm isotropic, z-score normalize per-volume, and use nnU-Net default aug. **No top team uses N4 bias correction**. See `data/preprocess.py` for the aligned pipeline.
 
 ## Architecture
-- **Frozen**: SAM2 image encoder (ViT-H) + most of the mask decoder (final layer trainable).
-- **Trainable (~2M params total)**:
-  - `CrossSessionMemoryAttention` — cross-session (attn to M_aug) + within-session (attn to M_mid) + learned gate.
-  - Continuous-time encoder — sinusoidal + MLP over weeks-elapsed (discrete `nn.Embedding` retained as ablation via `temporal_encoder_type: discrete`).
-  - `CrossPatientRetrieval` + `CrossPatientBank` — top-K retrieval of pre-RT neighbors; injects their tumor-localized `(mid - pre)` change templates as extra tokens onto M_pre.
-  - `ChangeHead` — 3-class change map (stable/grown/shrunk), XOR-supervised.
-  - `FeatureEvolutionPredictor` (~200k params) — predicts mid-RT features from pre-RT + t; drives the consistency loss.
-  - Dual-head decoder — per-structure GTVp / GTVn via pre-RT mask prompting of SAM2.
-- **Training mode**: sequence training accumulates M_mid across consecutive mid-RT slices so the within-session attention and gate actually learn.
-- **Loss**: `L_dice + 0.3 * CE(change_map) + 0.2 * L_consistency`, where `L_consistency = || g(pre_features, t) - mid_features ||^2` on tumor regions.
+
+### Image encoder — two options (`model.encoder_type`)
+- **`sam2`** (original): frozen SAM2.1 Hiera (Base+ or Large). Emits `image_emb [B, 256, 64, 64]` + `high_res_features [s0, s1]` via `sam2.forward_image`.
+- **`dino_sam`** (new; default on `tals-local`): **frozen DINOv2** (default `facebook/dinov2-base`, patch-14 at 518 → 37×37 grid) + **trainable Bridge (~13.9 M params)** that fuses 4 equally-spaced DINO layers into the same `image_emb [B, 256, 64, 64]` + `high_res_features` contract. Ported from `~/Documents/galash`. Claim: DINOv2 carries better medical-image priors than SAM2's prompt-tuned ViT (backed by `~/Documents/midl26` Table 3 — DINOv2-Base @ 518 wins 11-backbone KiTS19 ablation by +6 pts tumor Dice).
+
+### Decoder — two modes driven by encoder choice
+- **SAM2 path (encoder_type=sam2)**: pre-RT mask → SAM2's frozen prompt_encoder → `dense_embed`; decoder called with `multimask_output=True`, argmax over 3 candidates, `lambda_iou=0.1` trains the IoU head.
+- **Galash path (encoder_type=dino_sam)**: pre-RT mask is **not** fed to SAM2's prompt encoder. A small `MaskEncoder` inside Bridge embeds it to 64×64, then mask tokens + learned 2D pos-emb **cross-attend to image_emb** (TransformerDecoderLayer, d=256) — the attended output is the `dense_prompt`. Decoder called with `multimask_output=False` (1 mask per structure, no 3-candidate argmax), `lambda_iou=0.0`. Empty masks (BG slices / prompt-dropout) yield a learned "no-prior" dense_prompt from MaskEncoder biases.
+
+### Shared (unchanged by encoder swap)
+- `CrossSessionMemoryAttention` — cross-session (attn to M_aug) + within-session (attn to M_mid) + learned gate.
+- Continuous-time encoder — sinusoidal + MLP over weeks-elapsed (`temporal_encoder_type: discrete` retained as ablation).
+- `CrossPatientRetrieval` + `CrossPatientBank` — top-K retrieval of pre-RT neighbors; injects their tumor-localized `(mid - pre)` change templates as extra tokens onto M_pre.
+- `ChangeHead` — 3-class change map (stable/grown/shrunk), XOR-supervised. Under `dino_sam`, `pre_feats` for the change head is extracted under `torch.no_grad()` to avoid a second DINO autograd chain per slice (sequence-mode OOM fix).
+- `FeatureEvolutionPredictor` (~200K params) — predicts mid-RT features from pre-RT + t; drives the consistency loss.
+- Dual-head decoder — per-structure GTVp / GTVn via pre-RT mask (structure-specific) conditioning.
+- SAM2 mask decoder always trainable at `lr × 0.1`.
+
+### Trainable-parameter budget
+- `encoder_type: sam2`: ~2.9 M trainable + ~4 M SAM2 decoder = **~7 M**.
+- `encoder_type: dino_sam`: ~2.9 M + **~16.3 M Bridge** (13.9 M base + 2.4 M mask cross-attn path) + ~4 M SAM2 decoder = **~23 M**.
+
+### Training mode
+Sequence training accumulates M_mid across consecutive mid-RT slices so the within-session attention and gate actually learn. `retain_graph=True` keeps `M_pre`'s memory_encoder graph alive across the sequence; `_M_mid` is detached after each backward.
+
+### Loss
+`L_dice + 0.5 * L_bce + 0.1 * L_change + 0.1 * L_consistency + lambda_iou * L_iou`. `lambda_iou` is `0.0` under `dino_sam` (multimask=False has nothing to calibrate) and `0.1` under `sam2`. `L_consistency = || g(pre_features, t) - mid_features ||^2` on tumor regions with weights `(consistency_fg, consistency_bg)`.
 
 ## Repository Structure
 ```
@@ -30,7 +47,8 @@ csm-sam/
 │   │   ├── cross_session_memory_attention.py   # Core cross/within-session attention + gate
 │   │   ├── retrieval.py                        # CrossPatientBank, CrossPatientRetrieval
 │   │   ├── csm_sam.py                          # Full RALM-SAM wrapper (dual-head decoder)
-│   │   └── change_head.py                      # Change map prediction
+│   │   ├── change_head.py                      # Change map prediction
+│   │   └── dino_encoder.py                     # DinoEncoder = frozen DINOv2 + trainable Bridge (with mask cross-attn)
 │   ├── datasets/                               # 8 dataset loaders, uniform __getitem__ contract
 │   │   ├── hnts_mrg.py                         # HNTS-MRG 2024 (primary; pre-RT + mid-RT)
 │   │   ├── brats_gli.py                        # BraTS-GLI 2024 post-treatment (longitudinal pairs)
@@ -107,8 +125,19 @@ python data/download_hnts_mrg.py --output_dir data/raw
 # 3. Preprocess
 python data/preprocess.py --input_dir data/raw --output_dir data/processed
 
-# 4. Train (sequence mode, fold 0 of 5)
+# 4. Train (sequence mode, fold 0 of 5) — defaults to encoder_type=dino_sam on tals-local
 python train.py --config configs/default.yaml --sequence_train --fold 0 --n_folds 5
+
+# 4a. Local single-GPU wrapper (bs=2, no SLURM, dino_sam from config)
+bash scripts/train_local.sh
+
+# 4b. SLURM (4 GPUs / single GPU): see slurm/train_dgx.sbatch, slurm/train_single.sbatch
+sbatch slurm/train_dgx.sbatch
+
+# 4c. Toggle encoders from the CLI:
+#   --encoder_type sam2     # original SAM2-Hiera backbone
+#   --encoder_type dino_sam # frozen DINOv2 + trainable Bridge (+ mask cross-attn dense_prompt)
+#   --dino_variant dinov2_base | dinov2_small | dinov2_large
 
 # 5. Build cross-patient bank over train split (scripts/build_bank.py is forthcoming)
 python scripts/build_bank.py --checkpoint checkpoints/best.pth --output bank.pt
@@ -135,6 +164,9 @@ Dataset dispatch:
 Override device with `DEVICE=cpu bash scripts/run_all_baselines.sh`; default is `cuda`.
 
 ## Key Design Decisions
+- **Why DINOv2 instead of SAM2-Hiera for the encoder?** SAM2's image encoder was prompt-tuned on 1B natural-image masks; it carries the wrong spatial priors for dense medical segmentation. A frozen DINOv2 self-supervised on LVD-142M transfers noticeably better — `~/Documents/midl26` Table 3 ablates 11 backbones on KiTS19 and DINOv2-Base @ 518 wins tumor Dice by ~6 pts over SAM2-Hiera-Base+/Large. Bridge is trainable (~13.9 M) to project DINO's 4 multi-scale layers into the SAM2 decoder's expected shape; DINO itself stays frozen so we benefit from its prior without overfitting 125 patients.
+- **Why keep SAM2's mask decoder?** It is pretrained to consume spatial features + prompts and produce tight masks. We use its mask decoder (trainable at lr×0.1) and its prompt encoder's sparse-placeholder output, but bypass its mask-prompt path under `dino_sam` — see below.
+- **Why put the mask through Bridge (cross-attention) instead of SAM2's prompt encoder?** SAM2's prompt encoder is frozen and was trained on natural-image masks. For tumor masks we want a trainable path that can learn domain-specific spatial priors. Bridge embeds the mask to 64×64 and cross-attends it to the (memory-aware) image_emb, producing `dense_prompt` directly. `multimask_output=False` because with a learned dense_prompt there's no need for 3-candidate hedging.
 - **Why SAM2 not nnUNet?** 150 training patients is small; SAM2's frozen ViT-H pretrained on 1B masks provides strong priors. We only train ~2M params.
 - **Why cross-session not within-session?** Within-session memory (MedSAM2) propagates slice→slice inside one 3D scan. We propagate visit→visit (week 0 → week 2-3), which is structurally novel.
 - **Why retrieval?** Each patient has only 2 time points, so per-patient trajectory learning is data-starved. Cross-patient retrieval pools evolution signals across the training set at inference, turning CSM-SAM into an in-context longitudinal segmenter.
