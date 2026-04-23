@@ -44,7 +44,7 @@ training:
   weight_decay: 0.0                    # overfit overrides
   warmup_epochs: 0                     # overfit overrides
   scheduler: "cosine"
-  gradient_clip_norm: 1.0
+  gradient_clip_norm: 100.0            # effectively off — r=32 LoRA had 8× more params, grad_norm hit the 1.0 cap and starved each LoRA param of its intended LR
   amp: false                           # disable AMP for cleaner overfit signal
   accumulate_grad_batches: 1
   sequence_length: 4
