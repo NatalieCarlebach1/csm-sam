@@ -842,6 +842,13 @@ def main():
         cfg.training.lr = 1e-4
         cfg.training.warmup_epochs = 0
         cfg.training.accumulate_grad_batches = 1
+        # Kill per-epoch wait: full-volume validation (slice-by-slice) and
+        # periodic checkpoints are not useful when overfitting N slices.
+        cfg.evaluation.val_every_n_epochs = 10**9
+        cfg.checkpoint.save_every_n_epochs = 10**9
+        cfg.checkpoint.save_best = False
+        # Log every step (overfit runs 1-2 steps/epoch; default 20 hides progress).
+        cfg.logging.log_every_n_steps = 1
         from torch.utils.data import Subset
         for key in ("train", "val"):
             if key in loaders:
