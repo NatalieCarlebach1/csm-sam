@@ -6,7 +6,7 @@ data:
   data_dir: "data/processed"           # preprocessed dataset directory
   image_size: 1024                     # SAM2.1 Hiera-L native res (DINO path was 512; SAM2 path runs at 1024)
   batch_size: 16                       # training batch size
-  num_workers: 8                       # dataloader workers per rank (16 OOM'd host RAM on 4-GPU DDP with cache=16)
+  num_workers: 4                       # halved from 8 — 51928 OOM'd at 1000G host RAM. 4 workers × 4 GPUs = 16 total, each with LRU cache.
   pin_memory: true
   tumor_ratio: 0.7                     # fraction of training slices with tumor
 
